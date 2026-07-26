@@ -1,4 +1,5 @@
 from elasticsearch import Elasticsearch
+from elasticsearch.helpers import bulk
 
 es = Elasticsearch("http://localhost:9200")
 
@@ -71,6 +72,28 @@ def update_merge_request(document: dict):
     )
 
     return response
+
+def bulk_index_merge_requests(documents):
+
+    def document_generator():
+
+        for document in documents:
+
+            yield {
+                "_index": "gitlab_merge_requests",
+                "_id": document["mr_id"],
+                "_source": document
+            }
+
+    success, errors = bulk(
+        client=es,
+        actions=document_generator()
+    )
+
+    print(f"Successfully indexed {success} merge requests.")
+
+    if errors:
+        print(errors)
 # sample_document = {
 #     "mr_id": 2,
 #     "title": "Implement Elasticsearch",

@@ -8,7 +8,8 @@ from elasticsearch_client import (
     search_merge_requests,
     merge_request_exists,
     get_merge_request_from_es,
-    update_merge_request
+    update_merge_request,
+    bulk_index_merge_requests
 )
 
 # created a FastAPI application
@@ -113,6 +114,9 @@ async def get_merge_requests():
     # Fetch merge requests from GitLab
     merge_requests = make_gitlab_request("merge_requests")
 
+    # List to store only new merge requests
+    new_documents = []
+
     # Store merge requests in Elasticsearch
     if isinstance(merge_requests, list):
 
@@ -139,8 +143,12 @@ async def get_merge_requests():
                     print(f"MR {document['mr_id']} updated")
 
             else:
-                index_merge_request(document)
-                print(f"MR {document['mr_id']} inserted")
+                new_documents.append(document)
+                print(f"MR {document['mr_id']} queued for bulk insert")
+
+        # Bulk insert all new merge requests
+        if new_documents:
+            bulk_index_merge_requests(new_documents)
 
     return merge_requests
 
