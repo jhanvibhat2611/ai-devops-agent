@@ -5,8 +5,14 @@ from workflow.state import WorkflowState
 from main import create_gitlab_branch
 from main import create_gitlab_merge_request
 from elasticsearch_client import search_merge_requests
+import os
+from langchain_ollama import ChatOllama
+from dotenv import load_dotenv
 
-llm = ChatOllama(model="llama3")
+load_dotenv()
+llm1 = ChatOllama(
+    model=os.getenv("OLLAMA_MODEL")
+)
 
 def retrieve_context(state: WorkflowState):
 
@@ -71,7 +77,7 @@ User Request:
 
     print("🤖 Calling Ollama...")
 
-    response = llm.invoke(prompt)
+    response = llm1.invoke(prompt)
 
     print("✅ Response received from Ollama.")
 

@@ -11,6 +11,7 @@ from elasticsearch_client import (
     update_merge_request,
     bulk_index_merge_requests
 )
+from ai_review import review_code
 
 # created a FastAPI application
 app = FastAPI()
@@ -57,6 +58,12 @@ def make_gitlab_request(endpoint: str):
         "error": response.status_code,
         "message": response.text
     }
+
+def get_merge_request_changes(mr_iid: int):
+
+    endpoint = f"merge_requests/{mr_iid}/changes"
+
+    return make_gitlab_request(endpoint)
 
 #reusable gitlab function for post
 def make_gitlab_post_request(endpoint: str, payload: dict):
@@ -225,3 +232,22 @@ async def get_merge_request(mr_iid: int):
 async def search(query: str):
 
     return search_merge_requests(query)
+
+@app.get("/review/{mr_iid}")
+async def review_merge_request(mr_iid: int):
+
+    changes = get_merge_request_changes(mr_iid)
+
+    if "changes" not in changes:
+        return changes
+
+    diff_text = ""
+
+    for change in changes["changes"]:
+        diff_text += change["diff"] + "\n"
+
+    review = review_code(diff_text)
+
+    return {
+        "review": review
+    }
