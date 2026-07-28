@@ -45,3 +45,30 @@ Git Diff:
     response = llm2.invoke(prompt)
 
     return response.content
+
+def suggest_code(diff: str):
+
+    prompt = f"""
+You are a Senior Software Engineer.
+
+Analyze the following Git diff and provide code improvement suggestions.
+
+Focus on:
+- Code quality
+- Readability
+- Performance
+- Security
+- Best practices
+
+If applicable:
+- Explain what should be improved.
+- Suggest better code snippets.
+- Explain why the suggested change is beneficial.
+
+Git Diff:
+{diff}
+"""
+
+    response = llm2.invoke(prompt)
+
+    return response.content

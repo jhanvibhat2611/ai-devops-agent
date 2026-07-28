@@ -11,7 +11,7 @@ from elasticsearch_client import (
     update_merge_request,
     bulk_index_merge_requests
 )
-from ai_review import review_code
+from ai_review import review_code,suggest_code
 
 # created a FastAPI application
 app = FastAPI()
@@ -251,3 +251,20 @@ async def review_merge_request(mr_iid: int):
     return {
         "review": review
     }
+
+@app.get("/suggest/{mr_iid}")
+async def suggest_merge_request(mr_iid: int):
+
+    changes = get_merge_request_changes(mr_iid)
+
+    if not changes["changes"]:
+        return {"suggestion": "No changes found."}
+
+    diff = ""
+
+    for change in changes["changes"]:
+        diff += change["diff"] + "\n"
+
+    suggestion = suggest_code(diff)
+
+    return {"suggestion": suggestion}
