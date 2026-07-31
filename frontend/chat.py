@@ -1,62 +1,76 @@
 import flet as ft
-
+from views.home import home_view
+from views.branches import branches_view
+from views.merge_requests import merge_requests_view
+from views.review import review_view
 
 def show_chat(page: ft.Page):
 
-    user_input = ft.TextField(
-        hint_text="Ask something...",
+    content = ft.Container(
         expand=True,
+        content=home_view(page)
     )
 
-    chat_history = ft.Column(
-        scroll=ft.ScrollMode.AUTO,
-        expand=True,
-    )
+    def change_view(e):
 
-    def send_message(e):
+        index = e.control.selected_index
 
-        if user_input.value.strip() == "":
-            return
+        if index == 0:
+            content.content = home_view(page)
 
-        # Display user message
-        chat_history.controls.append(
-            ft.Text(f"You: {user_input.value}")
-        )
+        elif index == 1:
+            content.content = branches_view(page)
 
-        # Placeholder AI response
-        chat_history.controls.append(
-            ft.Text("AI: Response will appear here...")
-        )
 
-        user_input.value = ""
+        elif index == 2:
+            content.content = merge_requests_view(page)
+
+        elif index == 3:
+            content.content = review_view(page)
 
         page.update()
+
+    navigation = ft.NavigationRail(
+        selected_index=0,
+        label_type=ft.NavigationRailLabelType.ALL,
+        on_change=change_view,
+        destinations=[
+            ft.NavigationRailDestination(
+                icon=ft.Icons.HOME,
+                label="Home"
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.ACCOUNT_TREE,
+                label="Branches"
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.MERGE_TYPE,
+                label="Merge Requests"
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.RATE_REVIEW,
+                label="AI Review"
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.AUTO_AWESOME,
+                label="Suggestions"
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.SEARCH,
+                label="Search"
+            ),
+        ]
+    )
 
     page.clean()
 
     page.add(
-        ft.Column(
-            [
-                ft.Text(
-                    "AI DevOps Agent",
-                    size=28,
-                    weight=ft.FontWeight.BOLD,
-                ),
-
-                ft.Divider(),
-
-                chat_history,
-
-                ft.Row(
-                    [
-                        user_input,
-                        ft.ElevatedButton(
-                            "Send",
-                            on_click=send_message,
-                        ),
-                    ]
-                ),
+        ft.Row(
+            controls=[
+                navigation,
+                ft.VerticalDivider(),
+                content
             ],
-            expand=True,
+            expand=True
         )
     )
