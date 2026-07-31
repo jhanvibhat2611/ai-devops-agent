@@ -47,23 +47,32 @@ Git Diff:
     return response.content
 
 def suggest_code(diff: str):
-
     prompt = f"""
-You are a Senior Software Engineer.
+    You are a Senior Software Engineer reviewing a GitLab Merge Request.
 
-Analyze the following Git diff and provide code improvement suggestions.
+    Analyze ONLY the code changes present in the Git diff.
 
-Focus on:
-- Code quality
-- Readability
-- Performance
-- Security
-- Best practices
+    Your goal is to propose practical code improvements that a developer can directly accept or reject.
 
-If applicable:
-- Explain what should be improved.
-- Suggest better code snippets.
-- Explain why the suggested change is beneficial.
+    Rules:
+
+    - Focus only on the modified code.
+    - Suggest changes only when they provide a clear improvement.
+    - Do NOT give generic advice.
+    - Do NOT comment on code that is already good.
+    - If no improvements are needed, reply:
+      "No code improvements suggested."
+
+    For every suggestion, use this format:
+
+    Suggestion Number:
+
+    File:
+    <file name if identifiable>
+
+    Current Code:
+    ```language
+    existing code
 
 Git Diff:
 {diff}

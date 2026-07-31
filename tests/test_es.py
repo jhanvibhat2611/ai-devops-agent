@@ -1,4 +1,4 @@
-from elasticsearch_client import es
+from backend.elasticsearch_client import es
 
 response = es.search(
     index="gitlab_merge_requests",

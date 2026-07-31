@@ -1,10 +1,9 @@
 import json
 
-from langchain_ollama import ChatOllama
 from workflow.state import WorkflowState
-from main import create_gitlab_branch
-from main import create_gitlab_merge_request
-from elasticsearch_client import search_merge_requests
+from backend.main import create_gitlab_branch
+from backend.main import create_gitlab_merge_request
+from backend.elasticsearch_client import search_merge_requests
 import os
 from langchain_ollama import ChatOllama
 from dotenv import load_dotenv
