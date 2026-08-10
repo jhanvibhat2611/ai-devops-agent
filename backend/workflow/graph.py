@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, END
-from workflow.state import WorkflowState
-from workflow.nodes import analyze_requirement, create_branch, create_merge_request, human_approval, approval_router, retrieve_context
+from backend.workflow.state import WorkflowState
+from backend.workflow.nodes import analyze_requirement, create_branch, create_merge_request, human_approval, approval_router, retrieve_context
 
 builder = StateGraph(WorkflowState)
 builder.add_node("analyze_requirement", analyze_requirement)

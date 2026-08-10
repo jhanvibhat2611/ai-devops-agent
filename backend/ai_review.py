@@ -48,36 +48,41 @@ Git Diff:
 
 def suggest_code(diff: str):
     prompt = f"""
-    You are a Senior Software Engineer reviewing a GitLab Merge Request.
+You are a senior Python developer.
 
-    Analyze ONLY the code changes present in the Git diff.
+Review the following Git diff.
 
-    Your goal is to propose practical code improvements that a developer can directly accept or reject.
+Find practical improvements related to:
+- code quality
+- readability
+- maintainability
+- Python best practices
+- logging
+- type hints
+- naming
+- error handling
 
-    Rules:
+For every improvement, return:
 
-    - Focus only on the modified code.
-    - Suggest changes only when they provide a clear improvement.
-    - Do NOT give generic advice.
-    - Do NOT comment on code that is already good.
-    - If no improvements are needed, reply:
-      "No code improvements suggested."
+Suggestion:
+Reason:
+Improved Code:
 
-    For every suggestion, use this format:
+If there are no improvements, reply exactly:
 
-    Suggestion Number:
-
-    File:
-    <file name if identifiable>
-
-    Current Code:
-    ```language
-    existing code
+No code improvements suggested.
 
 Git Diff:
 {diff}
 """
-
+    print("========== DIFF ==========")
+    print(diff)
+    print("==========================")
+    print(prompt)
     response = llm2.invoke(prompt)
+
+    print("========== MODEL RESPONSE ==========")
+    print(response.content)
+    print("====================================")
 
     return response.content

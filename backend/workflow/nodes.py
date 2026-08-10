@@ -1,6 +1,6 @@
 import json
 
-from workflow.state import WorkflowState
+from backend.workflow.state import WorkflowState
 from backend.main import create_gitlab_branch
 from backend.main import create_gitlab_merge_request
 from backend.elasticsearch_client import search_merge_requests
