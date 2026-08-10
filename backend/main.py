@@ -351,3 +351,46 @@ async def chat_decision(request: ChatDecisionRequest):
         "thread_id": request.thread_id,
         "message": "Workflow rejected by user."
     }
+
+
+
+@app.post("/webhook/gitlab")
+async def gitlab_webhook(payload: dict):
+    print("🔥 NEW WEBHOOK CODE IS RUNNING", flush=True)
+
+    print("\n========== GITLAB WEBHOOK ==========")
+
+    event_type = payload.get("object_kind")
+    project_name = payload.get("project", {}).get("name")
+    branch = payload.get("ref", "").replace("refs/heads/", "")
+    commit_sha = payload.get("after")
+    user_name = payload.get("user_name")
+
+    print("Event type:", event_type)
+    print("Project:", project_name)
+    print("Branch:", branch)
+    print("Commit SHA:", commit_sha)
+    print("User:", user_name)
+
+    commits = payload.get("commits", [])
+
+    print("\nCommits:")
+
+    for commit in commits:
+        print("  Commit:", commit.get("id"))
+        print("  Message:", commit.get("message"))
+        print("  Author:", commit.get("author", {}).get("name"))
+        print("  Modified:", commit.get("modified"))
+        print("  Added:", commit.get("added"))
+        print("  Removed:", commit.get("removed"))
+        print()
+
+    print("====================================\n")
+
+    return {
+        "status": "received",
+        "event_type": event_type,
+        "project": project_name,
+        "branch": branch,
+        "commit_sha": commit_sha
+    }
