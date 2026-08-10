@@ -4,6 +4,7 @@ from views.branches import branches_view
 from views.merge_requests import merge_requests_view
 from views.review import review_view
 from views.suggestions import suggestions_view
+from views.search import search_view
 
 def show_chat(page: ft.Page):
 
@@ -31,6 +32,9 @@ def show_chat(page: ft.Page):
 
         elif index == 4:
             content.content = suggestions_view(page)
+
+        elif index == 5:
+            content.content = search_view(page)
 
         page.update()
 
