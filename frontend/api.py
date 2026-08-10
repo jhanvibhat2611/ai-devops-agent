@@ -86,3 +86,27 @@ def search_merge_requests(query):
     )
 
     return response.json()
+
+def start_chat(message):
+
+    response = requests.post(
+        f"{BASE_URL}/chat",
+        json={
+            "message": message
+        }
+    )
+
+    return response.json()
+
+
+def send_chat_decision(thread_id, approved):
+
+    response = requests.post(
+        f"{BASE_URL}/chat/decision",
+        json={
+            "thread_id": thread_id,
+            "approved": approved
+        }
+    )
+
+    return response.json()

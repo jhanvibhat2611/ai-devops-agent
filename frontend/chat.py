@@ -5,35 +5,40 @@ from views.merge_requests import merge_requests_view
 from views.review import review_view
 from views.suggestions import suggestions_view
 from views.search import search_view
+from views.agent import agent_view
 
 def show_chat(page: ft.Page):
 
     content = ft.Container(
         expand=True,
-        content=home_view(page)
+        content=agent_view(page)
     )
 
     def change_view(e):
 
         index = e.control.selected_index
 
+
         if index == 0:
-            content.content = home_view(page)
+            content.content = agent_view(page)
 
         elif index == 1:
+            content.content = home_view(page)
+
+        elif index == 2:
             content.content = branches_view(page)
 
 
-        elif index == 2:
+        elif index == 3:
             content.content = merge_requests_view(page)
 
-        elif index == 3:
+        elif index == 4:
             content.content = review_view(page)
 
-        elif index == 4:
+        elif index == 5:
             content.content = suggestions_view(page)
 
-        elif index == 5:
+        elif index == 6:
             content.content = search_view(page)
 
         page.update()
@@ -43,6 +48,10 @@ def show_chat(page: ft.Page):
         label_type=ft.NavigationRailLabelType.ALL,
         on_change=change_view,
         destinations=[
+            ft.NavigationRailDestination(
+                icon=ft.Icons.AUTO_AWESOME,
+                label="AI Agent"
+            ),
             ft.NavigationRailDestination(
                 icon=ft.Icons.HOME,
                 label="Home"

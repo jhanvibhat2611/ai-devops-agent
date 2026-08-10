@@ -12,6 +12,12 @@ from elasticsearch_client import (
     bulk_index_merge_requests
 )
 from ai_review import review_code,suggest_code
+import uuid
+
+from pydantic import BaseModel
+from langgraph.types import Command
+
+from workflow.graph import graph
 
 # created a FastAPI application
 app = FastAPI()
@@ -40,6 +46,15 @@ class MergeRequest(BaseModel):
 
 class CommentRequest(BaseModel):
     body: str
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+class ChatDecisionRequest(BaseModel):
+    thread_id: str
+    approved: bool
+
 
 #reusable gitlab function for get
 def make_gitlab_request(endpoint: str):
@@ -98,7 +113,7 @@ async def home():
 async def get_branches():
     return make_gitlab_request("repository/branches")
 
-#get commits endpoint
+    #get commits endpoint
 @app.get("/commit/{commit_sha}")
 async def get_commit(commit_sha: str):
 
@@ -268,3 +283,71 @@ async def suggest_merge_request(mr_iid: int):
     suggestion = suggest_code(diff)
 
     return {"suggestion": suggestion}
+
+@app.post("/chat")
+async def chat(request: ChatRequest):
+
+    thread_id = str(uuid.uuid4())
+
+    config = {
+        "configurable": {
+            "thread_id": thread_id
+        }
+    }
+
+    result = graph.invoke(
+        {
+            "user_request": request.message
+        },
+        config=config
+    )
+
+    interrupts = result.get("__interrupt__", [])
+
+    if interrupts:
+
+        approval_request = interrupts[0].value
+
+        return {
+            "status": "waiting_for_approval",
+            "thread_id": thread_id,
+            "analysis": approval_request["analysis"],
+            "branch_name": approval_request["branch_name"],
+            "commit_message": approval_request["commit_message"],
+            "mr_title": approval_request["mr_title"]
+        }
+
+    return {
+        "status": "completed",
+        "thread_id": thread_id,
+        "result": result
+    }
+
+@app.post("/chat/decision")
+async def chat_decision(request: ChatDecisionRequest):
+
+    config = {
+        "configurable": {
+            "thread_id": request.thread_id
+        }
+    }
+
+    result = graph.invoke(
+        Command(resume=request.approved),
+        config=config
+    )
+
+    if request.approved:
+
+        return {
+            "status": "completed",
+            "thread_id": request.thread_id,
+            "mr_url": result.get("mr_url", ""),
+            "result": result
+        }
+
+    return {
+        "status": "rejected",
+        "thread_id": request.thread_id,
+        "message": "Workflow rejected by user."
+    }

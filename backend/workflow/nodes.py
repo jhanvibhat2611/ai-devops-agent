@@ -1,17 +1,56 @@
 import json
 
-from backend.workflow.state import WorkflowState
-from backend.main import create_gitlab_branch
-from backend.main import create_gitlab_merge_request
-from backend.elasticsearch_client import search_merge_requests
+from workflow.state import WorkflowState
+from elasticsearch_client import search_merge_requests
 import os
 from langchain_ollama import ChatOllama
 from dotenv import load_dotenv
 
 load_dotenv()
 llm1 = ChatOllama(
-    model=os.getenv("OLLAMA_MODEL")
+    model=os.getenv("OLLAMA_AI_MODEL")
 )
+
+def validate_request(state: WorkflowState):
+
+    request = state["user_request"].strip()
+
+    if not request:
+        return {
+            "request_valid": False,
+            "validation_message": "Please provide a development task."
+        }
+
+    vague_requests = [
+        "hi",
+        "hello",
+        "hey",
+        "test",
+        "help",
+        "ok",
+        "okay"
+    ]
+
+    if request.lower() in vague_requests:
+        return {
+            "request_valid": False,
+            "validation_message": (
+                "Please describe a development task. "
+                "For example: 'Create a login system using JWT.'"
+            )
+        }
+
+    return {
+        "request_valid": True,
+        "validation_message": ""
+    }
+
+def validation_router(state: WorkflowState):
+
+    if state["request_valid"]:
+        return "valid"
+
+    return "invalid"
 
 def retrieve_context(state: WorkflowState):
 
@@ -105,7 +144,7 @@ User Request:
     }
 
 def create_branch(state: WorkflowState):
-
+    from main import create_gitlab_branch
     branch_name = state["branch_name"]
     print("Branch from LLM:", state["branch_name"])
     result = create_gitlab_branch(
@@ -121,7 +160,7 @@ def create_branch(state: WorkflowState):
 
 
 def create_merge_request(state: WorkflowState):
-
+    from main import create_gitlab_merge_request
     result = create_gitlab_merge_request(
         source=state["branch_name"],
         target="main",
@@ -134,18 +173,22 @@ def create_merge_request(state: WorkflowState):
         "mr_url": result.get("web_url", "")
     }
 
+from langgraph.types import interrupt
+
+
 def human_approval(state: WorkflowState):
 
-    print("\n===== AI Suggestions =====")
-    print("Analysis:", state["analysis"])
-    print("Branch:", state["branch_name"])
-    print("Commit:", state["commit_message"])
-    print("MR Title:", state["mr_title"])
+    approval_request = {
+        "analysis": state["analysis"],
+        "branch_name": state["branch_name"],
+        "commit_message": state["commit_message"],
+        "mr_title": state["mr_title"],
+    }
 
-    choice = input("\nApprove? (y/n): ")
+    decision = interrupt(approval_request)
 
     return {
-        "approved": choice.lower() == "y"
+        "approved": decision
     }
 def approval_router(state: WorkflowState):
     if state["approved"]:

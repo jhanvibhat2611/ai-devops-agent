@@ -9,3 +9,6 @@ class WorkflowState(TypedDict):
     mr_title: str
     mr_url: str
     approved: bool
+
+    request_valid: bool
+    validation_message: str
