@@ -151,3 +151,283 @@
 - The current application supports both direct UI-based GitLab operations and AI-powered review/suggestion functionality.
 - The AI chatbot is planned as the next major frontend feature and will provide a natural-language interface to the existing backend capabilities.
 - Search and event-driven automation are still pending.
+
+
+---
+
+## 10 August 2026
+
+### Progress Completed
+
+- Continued development of the GitLab integration and AI DevOps backend.
+- Implemented and tested the GitLab webhook endpoint:
+  - Added `POST /webhook/gitlab`.
+  - Parsed GitLab webhook payload information including:
+    - Event type.
+    - Project name.
+    - Branch.
+    - Commit SHA.
+    - User name.
+    - Commit information.
+  - Added backend logging for received webhook information.
+- Tested the webhook locally using PowerShell `Invoke-RestMethod`.
+- Tested the webhook through ngrok.
+- Debugged an issue where ngrok returned `200 OK` but the expected webhook output was not appearing in the backend terminal.
+- Verified the FastAPI route registration and HTTP method.
+- Verified the imported `main.py` file and loaded webhook function.
+- Identified and terminated an old process listening on port `8000`.
+- Restarted Uvicorn and successfully verified that the updated webhook endpoint was being executed.
+- Confirmed successful webhook processing through the backend terminal.
+- Added a reusable GitLab GET request helper:
+  - `make_gitlab_request(endpoint)`
+- Added a reusable GitLab POST request helper:
+  - `make_gitlab_post_request(endpoint, payload)`
+- Added GitLab commit diff retrieval:
+  - `get_commit_diff(commit_sha)`
+- Added Git diff text extraction:
+  - `extract_diff_text(changes)`
+- Connected GitLab Merge Request changes to the AI Code Review workflow.
+- Tested AI Code Review using actual GitLab Merge Request diffs.
+- Implemented and refined AI Code Suggestions.
+- Updated the AI Code Suggestions prompt to require:
+  - Previous Code.
+  - Current Code.
+  - Suggested Code.
+  - Reason.
+- Added prompt rules to prevent the model from inventing previous code when analyzing a new file.
+- Added prompt rules requiring the model to analyze only code present in the Git diff.
+- Added prompt rules to prefer meaningful suggestions and avoid unnecessary complexity.
+- Added and tested the `/suggest/{mr_iid}` FastAPI endpoint.
+- Verified AI Code Suggestions against GitLab Merge Request `!9`.
+- Tested AI-generated review output and AI-generated code suggestions.
+- Connected the AI Code Review and AI Code Suggestions functionality to the Flet frontend.
+- Debugged a Flet import/scoping issue involving `ft` and successfully resolved it.
+- Verified the AI Review frontend.
+- Verified the AI Suggestions frontend.
+- Tested AI-generated review posting to GitLab.
+- Confirmed that AI review comments can be posted to a GitLab Merge Request.
+- Continued integrating the separate AI Review and AI Suggestions functionality into the main AI DevOps Agent.
+
+### Learned
+
+- How GitLab webhooks communicate repository events to external applications.
+- How ngrok can expose a local FastAPI server to GitLab during development.
+- How to debug webhook delivery and backend process issues.
+- How to inspect FastAPI registered routes and imported Python functions when debugging.
+- How to retrieve GitLab commit diffs using the GitLab REST API.
+- How to build reusable GitLab API request helpers.
+- How to convert GitLab diff responses into text suitable for LLM processing.
+- How to design prompts that distinguish previous code from newly added code.
+- How to make AI-generated code suggestions more structured and grounded in the provided diff.
+- How to connect AI processing endpoints to a Flet frontend.
+- How to debug frontend/backend integration problems.
+
+### Status
+
+- [x] GitLab Webhook Endpoint
+- [x] Local Webhook Testing
+- [x] ngrok Webhook Testing
+- [x] GitLab GET Helper
+- [x] GitLab POST Helper
+- [x] Commit Diff Retrieval
+- [x] AI Code Review
+- [x] AI Code Suggestions
+- [x] AI Review Endpoint
+- [x] AI Suggestion Endpoint
+- [x] AI Review Frontend
+- [x] AI Suggestions Frontend
+- [x] AI Review GitLab Comment Posting
+- [ ] Automated Push → AI Review Workflow
+- [ ] Automated Push → AI Suggestions Workflow
+- [ ] Jenkins Deployment
+
+---
+
+## 11 August 2026
+
+### Progress Completed
+
+- Continued development and integration of the AI DevOps Agent.
+- Refined AI Code Suggestions so that the model can provide:
+  - Previous Code.
+  - Current Code.
+  - Suggested Code.
+  - Reason for the suggested improvement.
+- Tested AI Code Suggestions with both:
+  - Existing code changes.
+  - New-file diffs where no previous version exists.
+- Added prompt rules to prevent hallucinated previous versions of code.
+- Verified that the AI can explicitly report:
+  - `No previous version available - this is new code.`
+- Implemented chatbot routing for AI Code Review and AI Code Suggestions.
+- Updated the `/chat` endpoint to distinguish between:
+  - Review requests.
+  - Suggestion requests.
+  - Normal development requests.
+- Added Merge Request ID extraction from natural-language chatbot requests.
+- Connected chatbot review requests to the existing GitLab diff retrieval and `review_code()` functionality.
+- Connected chatbot suggestion requests to the existing GitLab diff retrieval and `suggest_code()` functionality.
+- Preserved the existing LangGraph workflow for normal development requests.
+- Updated the Flet AI Agent view to handle:
+  - `type = "review"`.
+  - `type = "suggestion"`.
+  - Existing LangGraph approval responses.
+- Tested the chatbot directly from the Flet interface.
+- Successfully tested:
+  - `Review MR 9`
+  - `Give me suggestions for MR 9`
+- Confirmed that AI Code Review results are displayed inside the chatbot.
+- Confirmed that AI Code Suggestions are displayed inside the chatbot.
+- Tested the existing natural-language DevOps workflow from the chatbot:
+  - `Create a login system using JWT`
+- Confirmed that normal development requests continue to use the LangGraph workflow.
+- Confirmed that the LangGraph workflow still performs:
+  - Request validation.
+  - Elasticsearch context retrieval.
+  - Requirement analysis.
+  - AI-generated branch name.
+  - AI-generated commit message.
+  - AI-generated MR title.
+  - Human approval.
+  - Branch creation.
+  - Merge Request creation.
+- Confirmed that the chatbot can now serve as a unified interface for:
+  - GitLab development automation.
+  - AI Code Review.
+  - AI Code Suggestions.
+- Reviewed the overall project architecture and separated the responsibilities of:
+  - FastAPI.
+  - Flet.
+  - GitLab.
+  - Elasticsearch.
+  - Ollama.
+  - LangGraph.
+- Committed the chatbot integration changes to Git.
+
+### Architecture After Chatbot Integration
+
+The main chatbot now follows this routing structure:
+
+    User message
+         |
+         v
+    POST /chat
+         |
+         +-----------------------------+
+         |                             |
+         v                             v
+    Review/Suggestion              Normal request
+         |                             |
+         v                             v
+    GitLab MR diff                LangGraph workflow
+         |                             |
+      +--+--+                          v
+      |     |                       Validation
+      v     v                          |
+    Review Suggestion              Retrieval
+      |     |                          |
+      v     v                       Analysis
+   LLM output                          |
+         |                          Approval
+         |                         /        \
+         |                      Reject      Approve
+         |                                    |
+         |                                Branch
+         |                                    |
+         |                                  MR
+         |
+         v
+    Chatbot response
+
+### Learned
+
+- How to place a lightweight request router in front of an existing LangGraph workflow.
+- How multiple AI capabilities can be exposed through a single chatbot interface.
+- How to keep the existing LangGraph workflow isolated from read-only analysis operations such as code review and suggestions.
+- How to route natural-language requests such as:
+  - `Review MR 9`
+  - `Give me suggestions for MR 9`
+  to the appropriate backend functionality.
+- How the frontend can use response types to display different kinds of AI results.
+- How to integrate independent backend capabilities without modifying the existing LangGraph state.
+- How LangGraph human-in-the-loop approval can continue to work alongside chatbot-based review and suggestion functionality.
+- How to test backend routing independently before connecting it to the frontend.
+- How to preserve working functionality while progressively integrating new features.
+
+### Status
+
+- [x] AI Code Review
+- [x] AI Code Suggestions
+- [x] AI Review Endpoint
+- [x] AI Suggestion Endpoint
+- [x] AI Review Frontend
+- [x] AI Suggestions Frontend
+- [x] AI Review GitLab Comment Posting
+- [x] Chatbot Interface
+- [x] Chatbot Review Routing
+- [x] Chatbot Suggestion Routing
+- [x] Chatbot Integration with LangGraph
+- [x] Existing Human Approval Workflow
+- [x] Existing Branch Creation Workflow
+- [x] Existing Merge Request Creation Workflow
+- [ ] Automated Push Event Workflow
+- [ ] Automated Webhook → AI Review Workflow
+- [ ] Automated Webhook → AI Suggestions Workflow
+- [ ] Developer Approval/Rejection of AI Code Suggestions
+- [ ] Jenkins Deployment
+- [ ] CI/CD Pipeline
+- [ ] Automated Testing
+- [ ] Final Documentation and Project Cleanup
+
+---
+
+# Overall Project Status — 11 August 2026
+
+## Completed Major Components
+
+- [x] GitLab API integration
+- [x] GitLab branch management
+- [x] GitLab Merge Request management
+- [x] GitLab Merge Request diff retrieval
+- [x] GitLab reusable GET/POST helpers
+- [x] Elasticsearch integration
+- [x] Ollama local LLM integration
+- [x] Qwen2.5-Coder integration for code suggestions
+- [x] AI Code Review
+- [x] AI Code Suggestions
+- [x] Structured code suggestions
+- [x] AI review comment posting
+- [x] GitLab webhook endpoint
+- [x] Local webhook testing
+- [x] ngrok webhook testing
+- [x] LangGraph workflow
+- [x] Elasticsearch-based context retrieval
+- [x] AI requirement analysis
+- [x] Human-in-the-loop approval
+- [x] Automated branch creation
+- [x] Automated Merge Request creation
+- [x] Flet frontend
+- [x] AI Review frontend
+- [x] AI Suggestions frontend
+- [x] AI DevOps chatbot
+- [x] Chatbot review integration
+- [x] Chatbot suggestion integration
+- [x] Chatbot integration with existing LangGraph workflow
+
+## Remaining Major Components
+
+- [ ] Connect GitLab webhook events to the actual AI analysis workflow.
+- [ ] Automatically trigger AI Code Review from relevant GitLab events.
+- [ ] Automatically trigger AI Code Suggestions from relevant GitLab events.
+- [ ] Automatically post AI-generated suggestions to GitLab Merge Requests.
+- [ ] Implement developer approval/rejection for AI-generated suggestions.
+- [ ] Define how accepted AI-generated code should be applied.
+- [ ] Prevent accepted changes from being incorrectly flagged again.
+- [ ] Improve Search functionality.
+- [ ] Add automated tests.
+- [ ] Improve error handling and structured logging.
+- [ ] Set up Jenkins deployment.
+- [ ] Build and test the CI/CD pipeline.
+- [ ] Complete project documentation.
+- [ ] Perform final end-to-end testing.
+- [ ] Prepare final project demonstration.
