@@ -370,10 +370,8 @@ async def chat_decision(request: ChatDecisionRequest):
     }
 
 
-
 @app.post("/webhook/gitlab")
 async def gitlab_webhook(payload: dict):
-    print("🔥 NEW WEBHOOK CODE IS RUNNING", flush=True)
 
     print("\n========== GITLAB WEBHOOK ==========")
 
@@ -389,25 +387,43 @@ async def gitlab_webhook(payload: dict):
     print("Commit SHA:", commit_sha)
     print("User:", user_name)
 
-    commits = payload.get("commits", [])
+    # Get commit diff from GitLab
+    print("\n🔍 Getting commit diff from GitLab...")
 
-    print("\nCommits:")
+    changes = get_commit_diff(commit_sha)
 
-    for commit in commits:
-        print("  Commit:", commit.get("id"))
-        print("  Message:", commit.get("message"))
-        print("  Author:", commit.get("author", {}).get("name"))
-        print("  Modified:", commit.get("modified"))
-        print("  Added:", commit.get("added"))
-        print("  Removed:", commit.get("removed"))
-        print()
+    # Check if GitLab returned an error
+    if isinstance(changes, dict) and "error" in changes:
+        print("❌ Failed to get commit diff:")
+        print(changes)
 
-    print("====================================\n")
+        return {
+            "status": "error",
+            "message": "Failed to get commit diff",
+            "details": changes
+        }
+
+    # Convert GitLab diff response into clean text
+    diff_text = extract_diff_text(changes)
+
+    print("\n========== CODE DIFF ==========")
+    print(diff_text)
+
+    # Send diff to AI reviewer
+    print("\n========== AI REVIEW ==========")
+    print("🤖 Sending diff to AI...")
+
+    review = review_code(diff_text)
+
+    print("\n===== AI REVIEW RESULT =====")
+    print(review)
+    print("============================\n")
 
     return {
-        "status": "received",
+        "status": "reviewed",
         "event_type": event_type,
         "project": project_name,
         "branch": branch,
-        "commit_sha": commit_sha
+        "commit_sha": commit_sha,
+        "review": review
     }
