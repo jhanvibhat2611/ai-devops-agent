@@ -1,6 +1,11 @@
 import flet as ft
 
-from api import start_chat, send_chat_decision, post_ai_review
+from api import (
+    start_chat,
+    send_chat_decision,
+    post_ai_review,
+    post_ai_suggestion
+)
 
 
 def agent_view(page):
@@ -79,7 +84,10 @@ def agent_view(page):
 
             def post_review(e):
 
-                result = post_ai_review(mr_id)
+                result = post_ai_review(
+                    mr_id,
+                    review
+                )
 
                 if result.get("status") == "posted":
 
@@ -112,6 +120,8 @@ def agent_view(page):
 
         if response.get("type") == "suggestion":
 
+            mr_id = response.get("mr_iid")
+
             suggestion = response.get(
                 "suggestion",
                 "Unable to generate suggestions."
@@ -119,6 +129,35 @@ def agent_view(page):
 
             add_message(
                 f"AI Code Suggestions:\n\n{suggestion}"
+            )
+
+            def post_suggestion(e):
+
+                result = post_ai_suggestion(
+                    mr_id,
+                    suggestion
+                )
+
+                if result.get("status") == "posted":
+
+                    add_message(
+                        "✅ AI suggestions successfully posted to GitLab."
+                    )
+
+                else:
+
+                    add_message(
+                        "❌ Failed to post AI suggestions to GitLab.\n\n"
+                        f"{result.get('message', result)}"
+                    )
+
+                page.update()
+
+            messages.controls.append(
+                ft.ElevatedButton(
+                    "Post Suggestions to GitLab",
+                    on_click=post_suggestion
+                )
             )
 
             page.update()

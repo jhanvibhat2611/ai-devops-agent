@@ -55,6 +55,9 @@ class ChatDecisionRequest(BaseModel):
     thread_id: str
     approved: bool
 
+class SuggestionRequest(BaseModel):
+    suggestion: str
+
 
 #reusable gitlab function for get
 def make_gitlab_request(endpoint: str):
@@ -290,6 +293,33 @@ async def review_merge_request(mr_iid: int):
         "review": review
     }
 
+@app.post("/suggest/{mr_iid}/post")
+async def post_suggestion_to_gitlab(
+    mr_iid: int,
+    request: SuggestionRequest
+):
+
+    result = post_ai_suggestion(
+        mr_iid,
+        request.suggestion
+    )
+
+    if "error" in result:
+
+        return {
+            "status": "failed",
+            "message": result.get(
+                "message",
+                "Failed to post AI suggestions."
+            )
+        }
+
+    return {
+        "status": "posted",
+        "message": "AI suggestions successfully posted to GitLab.",
+        "mr_url": result.get("web_url", "")
+    }
+
 @app.post("/review/{mr_iid}/post")
 async def post_ai_review_to_gitlab(mr_iid: int):
 
@@ -331,6 +361,19 @@ def post_ai_review(mr_iid: int, review: str):
 
     payload = {
         "body": f"## 🤖 AI Code Review\n\n{review}"
+    }
+
+    return make_gitlab_post_request(
+        endpoint,
+        payload
+    )
+
+def post_ai_suggestion(mr_iid: int, suggestion: str):
+
+    endpoint = f"merge_requests/{mr_iid}/notes"
+
+    payload = {
+        "body": f"## 💡 AI Code Suggestions\n\n{suggestion}"
     }
 
     return make_gitlab_post_request(
