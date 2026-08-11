@@ -79,6 +79,12 @@ def get_commit_diff(commit_sha: str):
 
     return make_gitlab_request(endpoint)
 
+def get_merge_request_for_branch(branch: str):
+
+    endpoint = f"merge_requests?source_branch={branch}&state=opened"
+
+    return make_gitlab_request(endpoint)
+
 def extract_diff_text(changes):
 
     diff_text = ""
@@ -284,6 +290,19 @@ async def review_merge_request(mr_iid: int):
         "review": review
     }
 
+def post_ai_review(mr_iid: int, review: str):
+
+    endpoint = f"merge_requests/{mr_iid}/notes"
+
+    payload = {
+        "body": f"## 🤖 AI Code Review\n\n{review}"
+    }
+
+    return make_gitlab_post_request(
+        endpoint,
+        payload
+    )
+
 @app.get("/suggest/{mr_iid}")
 async def suggest_merge_request(mr_iid: int):
 
@@ -304,6 +323,157 @@ async def suggest_merge_request(mr_iid: int):
 @app.post("/chat")
 async def chat(request: ChatRequest):
 
+    message = request.message.strip()
+    message_lower = message.lower()
+
+    # ============================================================
+    # AI CODE REVIEW REQUEST
+    # ============================================================
+
+    if "review" in message_lower and "mr" in message_lower:
+
+        import re
+
+        match = re.search(r"\bmr\s*#?\s*(\d+)\b", message_lower)
+
+        if not match:
+
+            return {
+                "status": "completed",
+                "type": "review",
+                "message": (
+                    "Please provide a Merge Request ID. "
+                    "For example: 'Review MR 9.'"
+                )
+            }
+
+        mr_iid = int(match.group(1))
+
+        changes = get_merge_request_changes(mr_iid)
+
+        if "changes" not in changes:
+
+            return {
+                "status": "completed",
+                "type": "review",
+                "message": changes.get(
+                    "message",
+                    "Unable to retrieve Merge Request changes."
+                )
+            }
+
+        if not changes["changes"]:
+
+            return {
+                "status": "completed",
+                "type": "review",
+                "message": "No changes found in this Merge Request."
+            }
+
+        diff = ""
+
+        for change in changes["changes"]:
+
+            diff += (
+                f"\nFile: {change.get('new_path')}\n"
+            )
+
+            diff += change.get(
+                "diff",
+                ""
+            )
+
+            diff += "\n"
+
+        review = review_code(diff)
+
+        return {
+            "status": "completed",
+            "type": "review",
+            "mr_iid": mr_iid,
+            "review": review
+        }
+
+    # ============================================================
+    # AI CODE SUGGESTION REQUEST
+    # ============================================================
+
+    if (
+        "suggest" in message_lower
+        or "suggestion" in message_lower
+        or "improve" in message_lower
+    ) and "mr" in message_lower:
+
+        import re
+
+        match = re.search(
+            r"\bmr\s*#?\s*(\d+)\b",
+            message_lower
+        )
+
+        if not match:
+
+            return {
+                "status": "completed",
+                "type": "suggestion",
+                "message": (
+                    "Please provide a Merge Request ID. "
+                    "For example: "
+                    "'Give me suggestions for MR 9.'"
+                )
+            }
+
+        mr_iid = int(match.group(1))
+
+        changes = get_merge_request_changes(mr_iid)
+
+        if "changes" not in changes:
+
+            return {
+                "status": "completed",
+                "type": "suggestion",
+                "message": changes.get(
+                    "message",
+                    "Unable to retrieve Merge Request changes."
+                )
+            }
+
+        if not changes["changes"]:
+
+            return {
+                "status": "completed",
+                "type": "suggestion",
+                "message": "No changes found in this Merge Request."
+            }
+
+        diff = ""
+
+        for change in changes["changes"]:
+
+            diff += (
+                f"\nFile: {change.get('new_path')}\n"
+            )
+
+            diff += change.get(
+                "diff",
+                ""
+            )
+
+            diff += "\n"
+
+        suggestion = suggest_code(diff)
+
+        return {
+            "status": "completed",
+            "type": "suggestion",
+            "mr_iid": mr_iid,
+            "suggestion": suggestion
+        }
+
+    # ============================================================
+    # EXISTING LANGGRAPH WORKFLOW
+    # ============================================================
+
     thread_id = str(uuid.uuid4())
 
     config = {
@@ -314,12 +484,15 @@ async def chat(request: ChatRequest):
 
     result = graph.invoke(
         {
-            "user_request": request.message
+            "user_request": message
         },
         config=config
     )
 
-    interrupts = result.get("__interrupt__", [])
+    interrupts = result.get(
+        "__interrupt__",
+        []
+    )
 
     if interrupts:
 
@@ -369,7 +542,6 @@ async def chat_decision(request: ChatDecisionRequest):
         "message": "Workflow rejected by user."
     }
 
-
 @app.post("/webhook/gitlab")
 async def gitlab_webhook(payload: dict):
 
@@ -387,13 +559,40 @@ async def gitlab_webhook(payload: dict):
     print("Commit SHA:", commit_sha)
     print("User:", user_name)
 
-    # Get commit diff from GitLab
+    # ------------------------------------------------
+    # 1. Find an open MR for this branch
+    # ------------------------------------------------
+
+    print("\n🔍 Finding open Merge Request...")
+
+    merge_requests = get_merge_request_for_branch(branch)
+
+    if not isinstance(merge_requests, list) or not merge_requests:
+
+        print("⚠️ No open Merge Request found for this branch.")
+
+        return {
+            "status": "received",
+            "message": "No open Merge Request found",
+            "branch": branch,
+            "commit_sha": commit_sha
+        }
+
+    mr = merge_requests[0]
+    mr_iid = mr["iid"]
+
+    print(f"✅ Found Merge Request: !{mr_iid}")
+
+    # ------------------------------------------------
+    # 2. Get commit diff
+    # ------------------------------------------------
+
     print("\n🔍 Getting commit diff from GitLab...")
 
     changes = get_commit_diff(commit_sha)
 
-    # Check if GitLab returned an error
     if isinstance(changes, dict) and "error" in changes:
+
         print("❌ Failed to get commit diff:")
         print(changes)
 
@@ -403,13 +602,19 @@ async def gitlab_webhook(payload: dict):
             "details": changes
         }
 
-    # Convert GitLab diff response into clean text
+    # ------------------------------------------------
+    # 3. Extract clean diff
+    # ------------------------------------------------
+
     diff_text = extract_diff_text(changes)
 
     print("\n========== CODE DIFF ==========")
     print(diff_text)
 
-    # Send diff to AI reviewer
+    # ------------------------------------------------
+    # 4. AI review
+    # ------------------------------------------------
+
     print("\n========== AI REVIEW ==========")
     print("🤖 Sending diff to AI...")
 
@@ -417,7 +622,22 @@ async def gitlab_webhook(payload: dict):
 
     print("\n===== AI REVIEW RESULT =====")
     print(review)
-    print("============================\n")
+
+    # ------------------------------------------------
+    # 5. Post review to GitLab MR
+    # ------------------------------------------------
+
+    print("\n💬 Posting AI review to GitLab...")
+
+    comment_result = post_ai_review(
+        mr_iid,
+        review
+    )
+
+    print("GitLab comment response:")
+    print(comment_result)
+
+    print("====================================\n")
 
     return {
         "status": "reviewed",
@@ -425,5 +645,6 @@ async def gitlab_webhook(payload: dict):
         "project": project_name,
         "branch": branch,
         "commit_sha": commit_sha,
+        "mr_iid": mr_iid,
         "review": review
     }

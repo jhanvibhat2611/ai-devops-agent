@@ -60,6 +60,44 @@ def agent_view(page):
 
         response = start_chat(message)
 
+        # ============================================================
+        # AI CODE REVIEW
+        # ============================================================
+
+        if response.get("type") == "review":
+            review = response.get(
+                "review",
+                "Unable to generate review."
+            )
+
+            add_message(
+                f"AI Code Review:\n\n{review}"
+            )
+
+            page.update()
+            return
+
+        # ============================================================
+        # AI CODE SUGGESTION
+        # ============================================================
+
+        if response.get("type") == "suggestion":
+            suggestion = response.get(
+                "suggestion",
+                "Unable to generate suggestions."
+            )
+
+            add_message(
+                f"AI Code Suggestions:\n\n{suggestion}"
+            )
+
+            page.update()
+            return
+
+        # ============================================================
+        # EXISTING LANGGRAPH WORKFLOW
+        # ============================================================
+
         if response.get("status") == "waiting_for_approval":
 
             current_thread_id = response["thread_id"]
@@ -93,17 +131,20 @@ def agent_view(page):
 
         else:
 
-            result = response.get("result", {})
+            result = response.get(
+                "result",
+                {}
+            )
 
             if result.get("request_valid") is False:
 
-                message = result.get(
+                validation_message = result.get(
                     "validation_message",
                     "Please provide a valid development task."
                 )
 
                 add_message(
-                    f"AI DevOps Agent:\n\n{message}"
+                    f"AI DevOps Agent:\n\n{validation_message}"
                 )
 
             else:
