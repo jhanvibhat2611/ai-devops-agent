@@ -73,6 +73,23 @@ def make_gitlab_request(endpoint: str):
         "error": response.status_code,
         "message": response.text
     }
+def get_commit_diff(commit_sha: str):
+
+    endpoint = f"repository/commits/{commit_sha}/diff"
+
+    return make_gitlab_request(endpoint)
+
+def extract_diff_text(changes):
+
+    diff_text = ""
+
+    for change in changes:
+
+        diff_text += f"\nFile: {change.get('new_path')}\n"
+        diff_text += change.get("diff", "")
+        diff_text += "\n"
+
+    return diff_text
 
 def get_merge_request_changes(mr_iid: int):
 
