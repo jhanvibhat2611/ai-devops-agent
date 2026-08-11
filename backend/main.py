@@ -290,6 +290,41 @@ async def review_merge_request(mr_iid: int):
         "review": review
     }
 
+@app.post("/review/{mr_iid}/post")
+async def post_ai_review_to_gitlab(mr_iid: int):
+
+    changes = get_merge_request_changes(mr_iid)
+
+    if "changes" not in changes:
+        return changes
+
+    if not changes["changes"]:
+        return {
+            "status": "error",
+            "message": "No changes found in this Merge Request."
+        }
+
+    diff_text = ""
+
+    for change in changes["changes"]:
+        diff_text += (
+            f"\nFile: {change.get('new_path')}\n"
+            f"{change.get('diff', '')}\n"
+        )
+
+    review = review_code(diff_text)
+
+    result = post_ai_review(
+        mr_iid,
+        review
+    )
+
+    return {
+        "status": "posted",
+        "mr_iid": mr_iid,
+        "review": review,
+        "gitlab_response": result
+    }
 def post_ai_review(mr_iid: int, review: str):
 
     endpoint = f"merge_requests/{mr_iid}/notes"
@@ -324,71 +359,55 @@ async def suggest_merge_request(mr_iid: int):
 async def chat(request: ChatRequest):
 
     message = request.message.strip()
-    message_lower = message.lower()
 
     # ============================================================
     # AI CODE REVIEW REQUEST
     # ============================================================
 
-    if "review" in message_lower and "mr" in message_lower:
+    if message.lower().startswith("review mr"):
 
-        import re
+        parts = message.split()
 
-        match = re.search(r"\bmr\s*#?\s*(\d+)\b", message_lower)
-
-        if not match:
-
+        if len(parts) < 3 or not parts[2].isdigit():
             return {
-                "status": "completed",
                 "type": "review",
-                "message": (
-                    "Please provide a Merge Request ID. "
-                    "For example: 'Review MR 9.'"
-                )
+                "mr_iid": None,
+                "review": "Please provide a valid Merge Request ID."
             }
 
-        mr_iid = int(match.group(1))
+        mr_iid = int(parts[2])
 
         changes = get_merge_request_changes(mr_iid)
 
         if "changes" not in changes:
-
             return {
-                "status": "completed",
                 "type": "review",
-                "message": changes.get(
+                "mr_iid": mr_iid,
+                "review": changes.get(
                     "message",
                     "Unable to retrieve Merge Request changes."
                 )
             }
 
         if not changes["changes"]:
-
             return {
-                "status": "completed",
                 "type": "review",
-                "message": "No changes found in this Merge Request."
+                "mr_iid": mr_iid,
+                "review": "No changes found in this Merge Request."
             }
 
-        diff = ""
+        diff_text = ""
 
         for change in changes["changes"]:
 
-            diff += (
+            diff_text += (
                 f"\nFile: {change.get('new_path')}\n"
+                f"{change.get('diff', '')}\n"
             )
 
-            diff += change.get(
-                "diff",
-                ""
-            )
-
-            diff += "\n"
-
-        review = review_code(diff)
+        review = review_code(diff_text)
 
         return {
-            "status": "completed",
             "type": "review",
             "mr_iid": mr_iid,
             "review": review
@@ -399,27 +418,22 @@ async def chat(request: ChatRequest):
     # ============================================================
 
     if (
-        "suggest" in message_lower
-        or "suggestion" in message_lower
-        or "improve" in message_lower
-    ) and "mr" in message_lower:
+        "suggest" in message.lower()
+        and "mr" in message.lower()
+    ):
 
         import re
 
         match = re.search(
-            r"\bmr\s*#?\s*(\d+)\b",
-            message_lower
+            r"mr\s*!?(\d+)",
+            message.lower()
         )
 
         if not match:
-
             return {
-                "status": "completed",
                 "type": "suggestion",
-                "message": (
-                    "Please provide a Merge Request ID. "
-                    "For example: "
-                    "'Give me suggestions for MR 9.'"
+                "suggestion": (
+                    "Please provide a valid Merge Request ID."
                 )
             }
 
@@ -428,43 +442,32 @@ async def chat(request: ChatRequest):
         changes = get_merge_request_changes(mr_iid)
 
         if "changes" not in changes:
-
             return {
-                "status": "completed",
                 "type": "suggestion",
-                "message": changes.get(
+                "suggestion": changes.get(
                     "message",
                     "Unable to retrieve Merge Request changes."
                 )
             }
 
         if not changes["changes"]:
-
             return {
-                "status": "completed",
                 "type": "suggestion",
-                "message": "No changes found in this Merge Request."
+                "suggestion": "No changes found in this Merge Request."
             }
 
-        diff = ""
+        diff_text = ""
 
         for change in changes["changes"]:
 
-            diff += (
+            diff_text += (
                 f"\nFile: {change.get('new_path')}\n"
+                f"{change.get('diff', '')}\n"
             )
 
-            diff += change.get(
-                "diff",
-                ""
-            )
-
-            diff += "\n"
-
-        suggestion = suggest_code(diff)
+        suggestion = suggest_code(diff_text)
 
         return {
-            "status": "completed",
             "type": "suggestion",
             "mr_iid": mr_iid,
             "suggestion": suggestion
@@ -489,10 +492,7 @@ async def chat(request: ChatRequest):
         config=config
     )
 
-    interrupts = result.get(
-        "__interrupt__",
-        []
-    )
+    interrupts = result.get("__interrupt__", [])
 
     if interrupts:
 

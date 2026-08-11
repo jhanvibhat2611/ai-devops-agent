@@ -67,6 +67,12 @@ def review_merge_request(mr_id):
     )
 
     return response.json()
+def post_ai_review(mr_id):
+    response = requests.post(
+        f"{BASE_URL}/review/{mr_id}/post"
+    )
+
+    return response.json()
 
 def suggest_merge_request(mr_id):
 

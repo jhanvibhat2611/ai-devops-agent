@@ -1,6 +1,6 @@
 import flet as ft
 
-from api import start_chat, send_chat_decision
+from api import start_chat, send_chat_decision, post_ai_review
 
 
 def agent_view(page):
@@ -60,11 +60,14 @@ def agent_view(page):
 
         response = start_chat(message)
 
-        # ============================================================
+        # ========================================================
         # AI CODE REVIEW
-        # ============================================================
+        # ========================================================
 
         if response.get("type") == "review":
+
+            mr_id = response.get("mr_iid")
+
             review = response.get(
                 "review",
                 "Unable to generate review."
@@ -74,14 +77,41 @@ def agent_view(page):
                 f"AI Code Review:\n\n{review}"
             )
 
+            def post_review(e):
+
+                result = post_ai_review(mr_id)
+
+                if result.get("status") == "posted":
+
+                    add_message(
+                        "✅ AI review successfully posted to GitLab."
+                    )
+
+                else:
+
+                    add_message(
+                        "❌ Failed to post AI review to GitLab.\n\n"
+                        f"{result.get('message', result)}"
+                    )
+
+                page.update()
+
+            messages.controls.append(
+                ft.ElevatedButton(
+                    "Post Review to GitLab",
+                    on_click=post_review
+                )
+            )
+
             page.update()
             return
 
-        # ============================================================
+        # ========================================================
         # AI CODE SUGGESTION
-        # ============================================================
+        # ========================================================
 
         if response.get("type") == "suggestion":
+
             suggestion = response.get(
                 "suggestion",
                 "Unable to generate suggestions."
@@ -94,9 +124,9 @@ def agent_view(page):
             page.update()
             return
 
-        # ============================================================
+        # ========================================================
         # EXISTING LANGGRAPH WORKFLOW
-        # ============================================================
+        # ========================================================
 
         if response.get("status") == "waiting_for_approval":
 
@@ -131,10 +161,7 @@ def agent_view(page):
 
         else:
 
-            result = response.get(
-                "result",
-                {}
-            )
+            result = response.get("result", {})
 
             if result.get("request_valid") is False:
 
@@ -170,12 +197,15 @@ def agent_view(page):
         mr_url = response.get("mr_url")
 
         if mr_url:
+
             message = (
                 "AI DevOps Agent:\n\n"
                 "✅ Workflow approved.\n\n"
                 f"Merge Request created:\n{mr_url}"
             )
+
         else:
+
             message = (
                 "AI DevOps Agent:\n\n"
                 "⚠️ Workflow was approved, but the Merge Request "
@@ -195,7 +225,7 @@ def agent_view(page):
         if not current_thread_id:
             return
 
-        response = send_chat_decision(
+        send_chat_decision(
             current_thread_id,
             False
         )
