@@ -2,6 +2,7 @@ from fastapi import FastAPI
 import requests
 from dotenv import load_dotenv
 import os
+import json
 from pydantic import BaseModel
 from elasticsearch_client import (
     index_merge_request,
@@ -508,12 +509,34 @@ async def chat(request: ChatRequest):
                 f"{change.get('diff', '')}\n"
             )
 
-        suggestion = suggest_code(diff_text)
+        suggestion_text = suggest_code(diff_text)
+
+        try:
+            json_start = suggestion_text.find("{")
+            json_end = suggestion_text.rfind("}") + 1
+
+            if json_start == -1 or json_end == 0:
+                raise ValueError("No JSON object found")
+
+            suggestion_data = json.loads(
+                suggestion_text[json_start:json_end]
+            )
+
+        except (json.JSONDecodeError, ValueError):
+
+            return {
+                "type": "suggestion",
+                "mr_iid": mr_iid,
+                "suggestion": suggestion_text
+            }
 
         return {
             "type": "suggestion",
             "mr_iid": mr_iid,
-            "suggestion": suggestion
+            "suggestions": suggestion_data.get(
+                "suggestions",
+                []
+            )
         }
 
     # ============================================================

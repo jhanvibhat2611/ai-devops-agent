@@ -114,54 +114,69 @@ def agent_view(page):
             page.update()
             return
 
-        # ========================================================
+        # ============================================================
         # AI CODE SUGGESTION
-        # ========================================================
+        # ============================================================
 
         if response.get("type") == "suggestion":
 
             mr_id = response.get("mr_iid")
+            suggestions = response.get("suggestions", [])
 
-            suggestion = response.get(
-                "suggestion",
-                "Unable to generate suggestions."
-            )
-
-            add_message(
-                f"AI Code Suggestions:\n\n{suggestion}"
-            )
-
-            def post_suggestion(e):
-
-                result = post_ai_suggestion(
-                    mr_id,
-                    suggestion
+            if not suggestions:
+                add_message(
+                    "AI Code Suggestions:\n\n"
+                    "No code improvements suggested."
                 )
+            else:
+                suggestion_text = "AI Code Suggestions:\n\n"
 
-                if result.get("status") == "posted":
-
-                    add_message(
-                        "✅ AI suggestions successfully posted to GitLab."
+                for i, suggestion in enumerate(suggestions, start=1):
+                    suggestion_text += (
+                        f"Suggestion {i}\n\n"
+                        f"File: {suggestion.get('file', 'Unknown')}\n\n"
+                        f"Previous Code:\n"
+                        f"{suggestion.get('previous_code') or 'No previous version available - this is new code.'}\n\n"
+                        f"Current Code:\n"
+                        f"{suggestion.get('current_code', '')}\n\n"
+                        f"Suggested Code:\n"
+                        f"{suggestion.get('suggested_code', '')}\n\n"
+                        f"Reason:\n"
+                        f"{suggestion.get('reason', '')}\n\n"
+                        "--------------------------------\n\n"
                     )
 
-                else:
+                add_message(suggestion_text)
 
-                    add_message(
-                        "❌ Failed to post AI suggestions to GitLab.\n\n"
-                        f"{result.get('message', result)}"
+                def post_suggestion(e):
+                    result = post_ai_suggestion(
+                        mr_id,
+                        suggestion_text
                     )
 
-                page.update()
+                    if result.get("status") == "posted":
+                        add_message(
+                            "✅ AI suggestions successfully posted to GitLab."
+                        )
+                    else:
+                        add_message(
+                            "❌ Failed to post AI suggestions to GitLab.\n\n"
+                            f"{result.get('message', result)}"
+                        )
 
-            messages.controls.append(
-                ft.ElevatedButton(
-                    "Post Suggestions to GitLab",
-                    on_click=post_suggestion
+                    page.update()
+
+                messages.controls.append(
+                    ft.ElevatedButton(
+                        "Post Suggestions to GitLab",
+                        on_click=post_suggestion
+                    )
                 )
-            )
 
             page.update()
             return
+
+
 
         # ========================================================
         # EXISTING LANGGRAPH WORKFLOW
