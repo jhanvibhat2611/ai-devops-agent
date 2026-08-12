@@ -47,154 +47,260 @@ Git Diff:
     return response.content
 
 
-def suggest_code(diff: str):
+def suggest_code(file_contents: list):
+
+    files_text = ""
+
+    for file in file_contents:
+        files_text += (
+            f"\n===== FILE: {file.get('file', 'Unknown')} =====\n"
+            f"{file.get('content', '')}\n"
+            f"===== END FILE =====\n"
+        )
 
     prompt = f"""
-You are a senior Python developer performing a careful code-improvement review.
+You are a senior Python developer reviewing source code from a Merge Request.
 
-Analyze ONLY the code shown in the Git diff.
+Analyze ONLY the actual Python source code provided below.
 
-Your goal is to suggest REAL, SAFE, and PRACTICAL improvements.
-
-============================================================
-CRITICAL RULE: PRESERVE FUNCTIONALITY
-============================================================
-
-Every suggested code change MUST preserve the original behavior of the code.
-
-DO NOT:
-
-- Remove a return statement if the original function returns a value.
-- Remove parameters.
-- Remove important calculations.
-- Remove function calls that affect behavior.
-- Change the output or return value unless the suggestion explicitly improves
-  an actual bug.
-- Replace working code with code that behaves differently without explaining
-  the behavioral change.
-- Suggest a change merely because it is stylistically different.
-- Invent requirements that are not visible in the diff.
-
-If you are not certain that a change is safe, DO NOT suggest it.
-
-============================================================
-ANALYSIS RULES
-============================================================
+Your job is to identify REAL, PRACTICAL, and JUSTIFIED improvements.
 
 Focus on:
 
-- Actual bugs
-- Readability
-- Maintainability
+- code quality
+- readability
+- maintainability
 - Python best practices
-- Type hints
-- Variable naming
-- Unnecessary operations
-- Realistic error handling
-- Security issues when genuinely relevant
-- Performance issues when genuinely relevant
+- type hints when genuinely useful
+- meaningful naming improvements
+- unnecessary variables
+- unnecessary operations
+- duplicated or redundant code
+- error handling when genuinely needed
+- logging when genuinely useful
+- security when relevant
 
-IMPORTANT:
+IMPORTANT RULES:
 
-1. Analyze ONLY the code appearing in the Git diff.
-2. NEVER invent a previous version.
-3. NEVER assume functionality that is not shown.
-4. If the diff contains only added (+) lines, treat it as new code.
-5. For new code, use:
+1. The provided content is the CURRENT source code from the Merge Request
+   source branch.
 
-**Previous Code:**
-No previous version available - this is new code.
+2. Treat the provided content as NORMAL SOURCE CODE.
+   It is NOT a Git diff.
 
-6. New code can still have meaningful improvements.
-7. Do NOT add unnecessary complexity.
-8. Do NOT add exception handling unless there is a realistic reason.
-9. Do NOT add imports unless genuinely required.
-10. Prefer 1-3 strong suggestions.
-11. Do not provide multiple variations of the same suggestion.
-12. Suggested code must be syntactically valid Python.
-13. Suggested code must be a realistic improvement of the current code.
-14. Preserve existing function inputs and outputs unless there is a clear bug.
-15. If the function returns a value, the suggested version should also return
-    the corresponding value.
-16. If there is no meaningful improvement, return:
+3. NEVER add Git diff formatting.
 
-No code improvements suggested.
+Do NOT use:
 
-============================================================
-IMPORTANT EXAMPLE
-============================================================
+- "+" prefixes
+- "-" prefixes
+- "@@" headers
+- Git diff syntax
 
-If the current code is:
+4. Do NOT invent previous code.
 
-def process(data):
-    x = data["name"]
-    print(x)
-    return x
+5. For a NEW file, use exactly:
 
-DO NOT suggest:
+"No previous version available - this is new code."
 
-def process(data):
-    x = data["name"]
-    print(x)
+------------------------------------------------------------
+CURRENT_CODE RULES
+------------------------------------------------------------
 
-because removing `return x` changes the behavior.
+6. current_code MUST contain the EXACT relevant code copied from
+   the provided source.
 
-A valid improvement could be:
+7. current_code is used by the application to verify that the file
+   has not changed before applying a suggestion.
 
-def process(data):
-    name = data.get("name")
-    print(name)
-    return name
+8. Therefore, current_code MUST NOT be modified in ANY way.
 
-ONLY suggest this if handling a missing "name" key is actually a meaningful
-improvement for the code shown.
+9. When copying current_code:
 
-============================================================
-OUTPUT FORMAT
-============================================================
+- Do not remove lines.
+- Do not add lines.
+- Do not reorder lines.
+- Do not remove duplicate lines.
+- Do not change indentation.
+- Do not change spacing.
+- Do not change quotes.
+- Do not reformat the code.
+- Do not simplify the code.
+- Do not correct mistakes.
+- Do not improve the code.
 
-Return ONLY valid JSON.
+10. If the source contains duplicate statements, current_code MUST
+    contain those duplicate statements exactly as provided.
 
-Do NOT return:
+11. If the source contains poor formatting, current_code MUST preserve
+    that formatting.
 
+12. ONLY suggested_code may contain changes.
+
+------------------------------------------------------------
+SUGGESTED_CODE RULES
+------------------------------------------------------------
+
+13. suggested_code MUST contain normal Python source code only.
+
+14. suggested_code MUST NOT contain:
+
+- "+" prefixes
+- "-" prefixes
+- "@@" headers
 - Markdown
-- ```json
-- Explanations outside the JSON
-- Introductory text
-- Closing remarks
+- Markdown code fences
+- explanations
+- Git diff formatting
 
-The response MUST start with {{ and end with }}.
+15. suggested_code must contain ONLY the improved version of the
+    relevant code section.
 
-Use exactly this structure:
+16. suggested_code must actually fix the problem described in reason.
 
-{{
-    "suggestions": [
-        {{
-            "file": "file name",
-            "previous_code": "actual removed code OR new-file message",
-            "current_code": "actual current code",
-            "suggested_code": "improved code",
-            "reason": "why this is a meaningful improvement"
-        }}
-    ]
-}}
+17. Do NOT preserve a problem that the suggestion claims to fix.
 
-If there are no meaningful improvements:
+For example, if the current code contains:
+
+print(name)
+print(name)
+
+and the reason says the duplicate print is unnecessary, then
+suggested_code MUST NOT contain both print statements.
+
+18. If duplicate or redundant code is the actual problem, remove the
+    redundancy when doing so provides a clear practical benefit.
+
+19. Do NOT add error handling merely because something COULD theoretically
+    fail.
+
+20. Do NOT add default values for missing dictionary keys unless the
+    source code gives a genuine reason that missing keys should be handled.
+
+21. Do NOT add type hints merely to make the code look more professional.
+
+22. Do NOT add complexity that is unrelated to the actual problem.
+
+23. Preserve the intended behavior of the original code unless changing
+    the behavior is genuinely necessary to fix the identified issue.
+
+24. Prefer the SMALLEST practical change that meaningfully improves
+    the code.
+
+------------------------------------------------------------
+SUGGESTION COUNT
+------------------------------------------------------------
+
+25. Return ONLY ONE strongest suggestion for each file.
+
+26. NEVER return multiple suggestions for the same file.
+
+27. If several improvements are possible, combine only closely related
+    improvements into ONE practical suggestion.
+
+28. Do NOT create a suggestion merely for stylistic preference.
+
+29. Only suggest a change when there is a clear practical benefit.
+
+30. If there is no meaningful improvement for a file, do not create
+    a suggestion for that file.
+
+31. If there are no meaningful improvements across all files, return:
 
 {{
     "suggestions": []
 }}
 
-============================================================
-GIT DIFF
-============================================================
+------------------------------------------------------------
+REASON RULES
+------------------------------------------------------------
 
-{diff}
+32. The reason MUST accurately describe what changed in suggested_code.
+
+33. Do NOT claim that type hints were added unless suggested_code actually
+    contains type hints.
+
+34. Do NOT claim that error handling was added unless suggested_code
+    actually contains error handling.
+
+35. Do NOT claim that duplicate code was removed unless suggested_code
+    actually removes the duplicate code.
+
+36. Do NOT claim that readability was improved unless there is an actual
+    meaningful readability improvement.
+
+------------------------------------------------------------
+NEW FILE RULE
+------------------------------------------------------------
+
+37. For a NEW file, previous_code MUST be exactly:
+
+"No previous version available - this is new code."
+
+38. Do NOT invent a previous version for a new file.
+
+------------------------------------------------------------
+OUTPUT FORMAT
+------------------------------------------------------------
+
+39. Return ONLY valid JSON.
+
+40. Do NOT wrap the JSON in Markdown.
+
+41. Do NOT use ```json.
+
+42. Do NOT include any text before or after the JSON.
+
+43. Use exactly this structure:
+
+{{
+    "suggestions": [
+        {{
+            "file": "filename.py",
+            "previous_code": "No previous version available - this is new code.",
+            "current_code": "EXACT unchanged source code",
+            "suggested_code": "improved Python code only",
+            "reason": "accurate explanation of the practical improvement"
+        }}
+    ]
+}}
+
+For an EXISTING file:
+
+- previous_code may contain a previous version ONLY if an actual
+  previous version is available.
+- Never invent a previous version.
+
+For a NEW file:
+
+- previous_code MUST be:
+  "No previous version available - this is new code."
+
+------------------------------------------------------------
+FINAL VALIDATION BEFORE RESPONDING
+------------------------------------------------------------
+
+Before returning the JSON, verify:
+
+1. current_code is copied exactly from the provided source.
+2. current_code contains all original duplicate lines.
+3. suggested_code is valid Python.
+4. suggested_code contains no Git diff markers.
+5. suggested_code actually improves the code.
+6. suggested_code actually fixes the problem mentioned in reason.
+7. The reason matches the actual changes.
+8. There is only ONE suggestion per file.
+9. No unnecessary complexity was introduced.
+10. The response is valid JSON only.
+
+Source Code:
+
+{files_text}
 """
 
-    print("========== DIFF ==========")
-    print(diff)
-    print("==========================")
+    print("========== SOURCE CODE SENT TO MODEL ==========")
+    print(files_text)
+    print("===============================================")
 
     response = llm2.invoke(prompt)
 

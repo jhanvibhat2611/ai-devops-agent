@@ -1,5 +1,7 @@
 import requests
 
+
+
 BASE_URL = "http://127.0.0.1:8000"
 
 def get_home():
@@ -85,6 +87,25 @@ def post_ai_suggestion(mr_id, suggestion):
 
     return response.json()
 
+def accept_ai_suggestion(
+    mr_id,
+    file,
+    previous_code,
+    current_code,
+    suggested_code
+):
+    response = requests.post(
+        f"{BASE_URL}/suggest/{mr_id}/accept",
+        json={
+            "file": file,
+            "previous_code": previous_code,
+            "current_code": current_code,
+            "suggested_code": suggested_code
+        }
+    )
+
+    return response.json()
+
 def suggest_merge_request(mr_id):
 
     response = requests.get(
@@ -108,12 +129,22 @@ def start_chat(message):
 
     response = requests.post(
         f"{BASE_URL}/chat",
-        json={
-            "message": message
-        }
+        json={"message": message}
     )
 
-    return response.json()
+    print("========== CHAT RESPONSE ==========")
+    print("STATUS:", response.status_code)
+    print("TEXT:", response.text)
+    print("===================================")
+
+    try:
+        return response.json()
+
+    except ValueError:
+        return {
+            "status": "error",
+            "message": f"Backend returned invalid response: {response.text}"
+        }
 
 
 def send_chat_decision(thread_id, approved):
@@ -127,3 +158,4 @@ def send_chat_decision(thread_id, approved):
     )
 
     return response.json()
+

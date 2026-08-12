@@ -4,9 +4,9 @@ from api import (
     start_chat,
     send_chat_decision,
     post_ai_review,
-    post_ai_suggestion
+    post_ai_suggestion,
+    accept_ai_suggestion
 )
-
 
 def agent_view(page):
 
@@ -117,65 +117,129 @@ def agent_view(page):
         # ============================================================
         # AI CODE SUGGESTION
         # ============================================================
-
         if response.get("type") == "suggestion":
 
             mr_id = response.get("mr_iid")
             suggestions = response.get("suggestions", [])
 
             if not suggestions:
+
                 add_message(
                     "AI Code Suggestions:\n\n"
                     "No code improvements suggested."
                 )
+
             else:
-                suggestion_text = "AI Code Suggestions:\n\n"
 
-                for i, suggestion in enumerate(suggestions, start=1):
-                    suggestion_text += (
-                        f"Suggestion {i}\n\n"
-                        f"File: {suggestion.get('file', 'Unknown')}\n\n"
+                for i, suggestion in enumerate(
+                        suggestions,
+                        start=1
+                ):
+
+                    file_path = suggestion.get(
+                        "file",
+                        "Unknown"
+                    )
+
+                    current_code = suggestion.get(
+                        "current_code",
+                        ""
+                    )
+
+                    suggested_code = suggestion.get(
+                        "suggested_code",
+                        ""
+                    )
+
+                    previous_code = suggestion.get(
+                        "previous_code"
+                    ) or (
+                                        "No previous version available - "
+                                        "this is new code."
+                                    )
+
+                    reason = suggestion.get(
+                        "reason",
+                        ""
+                    )
+
+                    suggestion_text = (
+                        f"AI Code Suggestion {i}\n\n"
+                        f"File: {file_path}\n\n"
                         f"Previous Code:\n"
-                        f"{suggestion.get('previous_code') or 'No previous version available - this is new code.'}\n\n"
+                        f"{previous_code}\n\n"
                         f"Current Code:\n"
-                        f"{suggestion.get('current_code', '')}\n\n"
+                        f"{current_code}\n\n"
                         f"Suggested Code:\n"
-                        f"{suggestion.get('suggested_code', '')}\n\n"
+                        f"{suggested_code}\n\n"
                         f"Reason:\n"
-                        f"{suggestion.get('reason', '')}\n\n"
-                        "--------------------------------\n\n"
+                        f"{reason}"
                     )
 
-                add_message(suggestion_text)
+                    add_message(suggestion_text)
 
-                def post_suggestion(e):
-                    result = post_ai_suggestion(
-                        mr_id,
-                        suggestion_text
-                    )
+                    def accept_suggestion(
+                            e,
+                            mr_id=mr_id,
+                            file_path=file_path,
+                            current_code=current_code,
+                            suggested_code=suggested_code
+                    ):
 
-                    if result.get("status") == "posted":
-                        add_message(
-                            "✅ AI suggestions successfully posted to GitLab."
+                        result = accept_ai_suggestion(
+                            mr_id,
+                            file_path,
+                            previous_code,
+                            current_code,
+                            suggested_code
                         )
-                    else:
+
+                        if result.get("status") == "accepted":
+
+                            add_message(
+                                "✅ Suggestion accepted.\n\n"
+                                "The suggested code was applied "
+                                "and committed to the Merge Request "
+                                "source branch.\n\n"
+                                f"Commit: "
+                                f"{result.get('commit_url', '')}"
+                            )
+
+                        else:
+
+                            add_message(
+                                "❌ Failed to apply suggestion.\n\n"
+                                f"{result.get('message', result)}"
+                            )
+
+                        page.update()
+
+                    def reject_suggestion(e):
+
                         add_message(
-                            "❌ Failed to post AI suggestions to GitLab.\n\n"
-                            f"{result.get('message', result)}"
+                            "❌ Suggestion rejected.\n\n"
+                            "No changes were made to GitLab."
                         )
 
-                    page.update()
+                        page.update()
 
-                messages.controls.append(
-                    ft.ElevatedButton(
-                        "Post Suggestions to GitLab",
-                        on_click=post_suggestion
+                    messages.controls.append(
+                        ft.Row(
+                            [
+                                ft.ElevatedButton(
+                                    "Accept Suggestion",
+                                    on_click=accept_suggestion
+                                ),
+                                ft.OutlinedButton(
+                                    "Reject Suggestion",
+                                    on_click=reject_suggestion
+                                )
+                            ]
+                        )
                     )
-                )
 
             page.update()
             return
-
 
 
         # ========================================================
