@@ -55,27 +55,48 @@ def suggest_code(file_contents: list, mr_context: list):
 
     for file in file_contents:
 
-        file_name = file.get("file", "Unknown")
-        source_code = file.get("content", "")
+        file_name = file.get(
+            "file",
+            "Unknown"
+        )
+
+        source_code = file.get(
+            "content",
+            ""
+        )
 
         if not source_code.strip():
             continue
 
-        # ------------------------------------------------------------
-        # Extract Python functions from the source code
-        # ------------------------------------------------------------
+        # ============================================================
+        # EXTRACT PYTHON FUNCTIONS
+        # ============================================================
 
         try:
-            tree = ast.parse(source_code)
+
+            tree = ast.parse(
+                source_code
+            )
+
         except SyntaxError:
-            print(f"⚠️ Could not parse {file_name} as Python.")
+
+            print(
+                f"⚠️ Could not parse {file_name} as Python."
+            )
+
             continue
 
         functions = []
 
         for node in ast.walk(tree):
 
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if isinstance(
+                node,
+                (
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef
+                )
+            ):
 
                 current_code = ast.get_source_segment(
                     source_code,
@@ -83,6 +104,7 @@ def suggest_code(file_contents: list, mr_context: list):
                 )
 
                 if current_code:
+
                     functions.append({
                         "name": node.name,
                         "code": current_code
@@ -91,27 +113,28 @@ def suggest_code(file_contents: list, mr_context: list):
         if not functions:
             continue
 
-        # ------------------------------------------------------------
-        # Build function context for the AI
-        # ------------------------------------------------------------
+        # ============================================================
+        # BUILD FUNCTION CONTEXT
+        # ============================================================
 
         functions_text = ""
 
         for function in functions:
 
             functions_text += (
-                f"\n===== FUNCTION: {function['name']} =====\n"
+                f"\n===== FUNCTION: "
+                f"{function['name']} =====\n"
                 f"{function['code']}\n"
                 f"===== END FUNCTION =====\n"
             )
 
-        # ------------------------------------------------------------
-        # Build Merge Request context
-        # ------------------------------------------------------------
-
-        context_text = ""
+        # ============================================================
+        # BUILD MERGE REQUEST CONTEXT
+        # ============================================================
 
         if mr_context:
+
+            context_text = ""
 
             for mr in mr_context:
 
@@ -123,49 +146,108 @@ Author: {mr.get("author", "")}
 
         else:
 
-            context_text = "No related Merge Request context was found."
+            context_text = (
+                "No related Merge Request context was found."
+            )
 
-        # ------------------------------------------------------------
-        # AI prompt
-        # ------------------------------------------------------------
+        # ============================================================
+        # AI PROMPT
+        # ============================================================
 
         prompt = f"""
-You are a senior Python developer reviewing code from a Merge Request.
+You are a senior Python developer reviewing code from a
+Merge Request.
 
 Analyze ONLY the Python functions provided below.
 
-Your job is to identify ONE REAL, PRACTICAL, and JUSTIFIED improvement.
+Your task is to identify AT MOST ONE REAL, PRACTICAL,
+and JUSTIFIED improvement.
 
-Focus on:
+============================================================
+WHAT COUNTS AS A REAL IMPROVEMENT
+============================================================
+
+Consider:
 
 - duplicated code
 - unnecessary variables
 - unnecessary operations
-- readability
-- maintainability
-- Python best practices
-- meaningful error handling
-- meaningful type hints
+- confusing logic
+- maintainability problems
+- meaningful Python best practices
+- genuinely useful error handling
+- genuinely useful type hints
 - security issues when relevant
 
-Do NOT make changes merely for style.
+Do NOT suggest changes merely because you prefer another style.
 
-Do NOT introduce unnecessary complexity.
+Do NOT make changes merely for:
+
+- formatting
+- quote style
+- personal preference
+- changing equivalent mathematical formulas
+- adding unnecessary type hints
+- adding unnecessary error handling
+- adding unnecessary complexity
+
+============================================================
+IMPORTANT BEHAVIOR RULE
+============================================================
+
+The existing code may already be correct.
+
+Do NOT claim that code is incorrect simply because another
+implementation is possible.
+
+If two implementations are functionally equivalent, do NOT
+describe one as a bug.
+
+For example:
+
+price - (price * discount)
+
+and:
+
+price * (1 - discount)
+
+are mathematically equivalent for the same inputs.
+
+Do NOT suggest changing between them unless there is another
+clear practical benefit.
 
 Do NOT invent requirements.
 
-Do NOT change behavior unless the change genuinely improves the code.
+Preserve the original behavior unless the change provides
+a clear practical improvement.
 
 ============================================================
-IMPORTANT
+MERGE REQUEST CONTEXT
 ============================================================
 
-The source code below is the ACTUAL source code from the
-Merge Request.
+The following related Merge Requests were retrieved from
+Elasticsearch:
 
-Each function is provided exactly as it exists in the file.
+{context_text}
 
-You must choose AT MOST ONE function to improve.
+Use this context ONLY when it is relevant.
+
+============================================================
+SOURCE FUNCTIONS
+============================================================
+
+File: {file_name}
+
+{functions_text}
+
+============================================================
+FUNCTION SELECTION
+============================================================
+
+Choose AT MOST ONE function.
+
+The function_name MUST exactly match one of the functions
+provided above.
 
 If there is no meaningful improvement, return:
 
@@ -174,27 +256,14 @@ If there is no meaningful improvement, return:
 }}
 
 ============================================================
-CURRENT CODE RULE
+SUGGESTED CODE
 ============================================================
 
-The backend will determine the exact current_code itself.
+suggested_code MUST contain the COMPLETE improved function.
 
-Therefore:
+It must include the complete function definition and body.
 
-DO NOT return current_code.
-
-DO NOT rewrite or copy the current function into the response.
-
-Only identify the function by its exact function name.
-
-============================================================
-SUGGESTED CODE RULE
-============================================================
-
-suggested_code MUST contain the COMPLETE improved version of
-the selected function.
-
-For example, if the original function is:
+For example:
 
 def find_user(user):
     if user.get("name") == "admin":
@@ -202,63 +271,66 @@ def find_user(user):
     else:
         return False
 
-and the improvement is to simplify it, suggested_code must be:
+can become:
 
 def find_user(user):
     return user.get("name") == "admin"
 
-NOT:
+Do NOT return only:
 
 return user.get("name") == "admin"
 
-The suggested_code must remain a complete valid Python function.
+The suggested_code MUST be a complete function.
 
 Do NOT include:
 
 - Git diff markers
-- "+"
-- "-"
-- "@@"
+- +
+- -
+- @@
 - Markdown
 - Markdown code fences
-- explanations inside suggested_code
+- explanations outside the function
 
 ============================================================
-REASON RULE
+REASON
 ============================================================
 
 The reason must accurately describe the actual change.
 
-Do not claim that:
+Do NOT claim:
 
 - duplicate code was removed unless it was removed
 - error handling was added unless it was added
 - type hints were added unless they were added
-- readability was improved unless there is an actual improvement
+- a bug was fixed unless there was actually a bug
+- readability improved unless there is a meaningful improvement
 
 ============================================================
-MERGE REQUEST CONTEXT
+CURRENT CODE
 ============================================================
 
-The following Merge Requests were retrieved from Elasticsearch:
+DO NOT return current_code.
 
-{context_text}
+The backend will determine current_code itself.
 
-Use this context only when it is relevant.
+Only return:
 
-============================================================
-FUNCTIONS TO REVIEW
-============================================================
-
-File: {file_name}
-
-{functions_text}
+- function_name
+- suggested_code
+- reason
 
 ============================================================
 OUTPUT FORMAT
 ============================================================
 
-Return ONLY valid JSON.
+Return ONLY a JSON object.
+
+Do NOT return Markdown.
+
+Do NOT return ```json.
+
+Do NOT return any text before or after the JSON.
 
 Return exactly:
 
@@ -278,72 +350,174 @@ OR:
     "suggestions": []
 }}
 
-Do not return anything outside the JSON object.
+============================================================
+FINAL CHECK
+============================================================
+
+Before returning the JSON, verify:
+
+1. function_name exists in the provided source.
+2. suggested_code is a complete function.
+3. suggested_code is valid Python.
+4. suggested_code contains no Markdown.
+5. suggested_code contains no Git diff markers.
+6. The change provides a real practical benefit.
+7. The original code was not incorrectly called a bug.
+8. The reason accurately describes the change.
+9. No unnecessary complexity was introduced.
+10. Only ONE suggestion is returned.
+11. The response is valid JSON.
 """
+
+        # ============================================================
+        # SEND TO QWEN
+        # ============================================================
 
         print(
             "\n========== SOURCE FUNCTIONS SENT TO MODEL =========="
         )
-        print(functions_text)
-        print("=====================================================")
 
-        response = llm2.invoke(prompt)
+        print(
+            functions_text
+        )
 
-        print("\n========== MODEL RESPONSE ==========")
-        print(response.content)
-        print("====================================")
+        print(
+            "====================================================="
+        )
 
-        # ------------------------------------------------------------
-        # Parse AI response
-        # ------------------------------------------------------------
+        response = llm2.invoke(
+            prompt
+        )
 
-        try:
+        response_text = (
+            response.content.strip()
+        )
 
-            response_text = response.content.strip()
+        print(
+            "\n========== MODEL RESPONSE =========="
+        )
 
-            # Remove accidental markdown fences if Ollama adds them
-            if response_text.startswith("```"):
-                response_text = response_text.replace(
+        print(
+            response_text
+        )
+
+        print(
+            "===================================="
+        )
+
+        # ============================================================
+        # CLEAN RESPONSE
+        # ============================================================
+
+        if response_text.startswith("```"):
+
+            response_text = (
+                response_text
+                .replace(
                     "```json",
                     "",
                     1
-                ).replace(
+                )
+                .replace(
                     "```",
                     "",
                     1
-                ).strip()
-
-            json_start = response_text.find("{")
-            json_end = response_text.rfind("}") + 1
-
-            if json_start == -1 or json_end == 0:
-                continue
-
-            parsed = json.loads(
-                response_text[json_start:json_end]
+                )
+                .strip()
             )
 
-        except json.JSONDecodeError:
+        # ============================================================
+        # EXTRACT JSON
+        # ============================================================
+
+        json_start = response_text.find("{")
+        json_end = response_text.rfind("}") + 1
+
+        if (
+            json_start == -1
+            or json_end <= json_start
+        ):
 
             print(
-                f"⚠️ Invalid JSON returned for {file_name}"
+                f"⚠️ No JSON object returned "
+                f"for {file_name}"
             )
 
             continue
+
+        json_text = response_text[
+            json_start:json_end
+        ]
+
+        # ============================================================
+        # PARSE JSON
+        #
+        # strict=False is intentional.
+        #
+        # Qwen sometimes returns literal newlines inside
+        # suggested_code strings. Standard JSON rejects those
+        # newlines, while strict=False allows them.
+        # ============================================================
+
+        try:
+
+            parsed = json.loads(
+                json_text,
+                strict=False
+            )
+
+        except json.JSONDecodeError as e:
+
+            print(
+                f"⚠️ Invalid JSON returned "
+                f"for {file_name}: {e}"
+            )
+
+            print(
+                "Raw model response:"
+            )
+
+            print(
+                response_text
+            )
+
+            continue
+
+        # ============================================================
+        # GET SUGGESTIONS
+        # ============================================================
 
         ai_suggestions = parsed.get(
             "suggestions",
             []
         )
 
+        if not isinstance(
+            ai_suggestions,
+            list
+        ):
+
+            print(
+                f"⚠️ Invalid suggestions format "
+                f"for {file_name}"
+            )
+
+            continue
+
         if not ai_suggestions:
             continue
 
-        # ------------------------------------------------------------
-        # Only ONE suggestion per file
-        # ------------------------------------------------------------
+        # ============================================================
+        # ONLY ONE SUGGESTION PER FILE
+        # ============================================================
 
         suggestion = ai_suggestions[0]
+
+        if not isinstance(
+            suggestion,
+            dict
+        ):
+            continue
 
         function_name = suggestion.get(
             "function_name"
@@ -354,66 +528,231 @@ Do not return anything outside the JSON object.
         )
 
         reason = suggestion.get(
-            "reason"
+            "reason",
+            ""
         )
 
-        if not function_name or not suggested_code:
+        if not function_name:
+
+            print(
+                f"⚠️ AI did not provide "
+                f"a function name for {file_name}"
+            )
+
             continue
 
-        # ------------------------------------------------------------
-        # Find the EXACT original function
-        # ------------------------------------------------------------
+        if not suggested_code:
+
+            print(
+                f"⚠️ AI did not provide "
+                f"suggested code for {file_name}"
+            )
+
+            continue
+
+        # ============================================================
+        # CLEAN SUGGESTED CODE
+        # ============================================================
+
+        suggested_code = (
+            suggested_code
+            .strip()
+        )
+
+        if suggested_code.startswith("```"):
+
+            suggested_code = (
+                suggested_code
+                .replace(
+                    "```python",
+                    "",
+                    1
+                )
+                .replace(
+                    "```",
+                    "",
+                    1
+                )
+                .strip()
+            )
+
+        # ============================================================
+        # FIND EXACT ORIGINAL FUNCTION
+        # ============================================================
 
         matching_function = None
 
         for function in functions:
 
-            if function["name"] == function_name:
+            if (
+                function["name"]
+                == function_name
+            ):
 
                 matching_function = function
                 break
 
         if not matching_function:
+
             print(
-                f"⚠️ AI selected unknown function "
-                f"{function_name}"
+                f"⚠️ AI selected unknown "
+                f"function: {function_name}"
             )
+
             continue
 
-        exact_current_code = matching_function["code"]
+        exact_current_code = (
+            matching_function["code"]
+        )
 
-        # ------------------------------------------------------------
-        # Validate suggested code
-        # ------------------------------------------------------------
+        # ============================================================
+        # VALIDATE SUGGESTED PYTHON
+        # ============================================================
 
         try:
-            ast.parse(suggested_code)
-        except SyntaxError:
+
+            suggested_tree = ast.parse(
+                suggested_code
+            )
+
+        except SyntaxError as e:
 
             print(
-                f"⚠️ AI returned invalid Python for "
+                f"⚠️ AI returned invalid "
+                f"Python for {function_name}: {e}"
+            )
+
+            continue
+
+        # ============================================================
+        # MAKE SURE SUGGESTED CODE CONTAINS
+        # THE CORRECT COMPLETE FUNCTION
+        # ============================================================
+
+        suggested_functions = []
+
+        for node in ast.walk(
+            suggested_tree
+        ):
+
+            if isinstance(
+                node,
+                (
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef
+                )
+            ):
+
+                suggested_functions.append(
+                    node
+                )
+
+        matching_suggested_function = None
+
+        for node in suggested_functions:
+
+            if (
+                node.name
+                == function_name
+            ):
+
+                matching_suggested_function = node
+                break
+
+        if not matching_suggested_function:
+
+            print(
+                f"⚠️ Suggested code does not "
+                f"contain the complete function "
                 f"{function_name}"
             )
 
             continue
 
-        # ------------------------------------------------------------
-        # Final suggestion
-        # ------------------------------------------------------------
+        # ============================================================
+        # REMOVE ACCIDENTAL EXTRA CODE
+        #
+        # We only want the selected function.
+        # ============================================================
+
+        suggested_function_code = (
+            ast.get_source_segment(
+                suggested_code,
+                matching_suggested_function
+            )
+        )
+
+        if not suggested_function_code:
+
+            print(
+                f"⚠️ Could not extract suggested "
+                f"function {function_name}"
+            )
+
+            continue
+
+        suggested_function_code = (
+            suggested_function_code.strip()
+        )
+
+        # ============================================================
+        # REJECT UNCHANGED SUGGESTIONS
+        # ============================================================
+
+        normalized_current = (
+            exact_current_code
+            .strip()
+        )
+
+        normalized_suggested = (
+            suggested_function_code
+            .strip()
+        )
+
+        if (
+            normalized_current
+            == normalized_suggested
+        ):
+
+            print(
+                f"ℹ️ AI returned unchanged code "
+                f"for {function_name}. "
+                f"Skipping suggestion."
+            )
+
+            continue
+
+        # ============================================================
+        # FINAL SUGGESTION
+        # ============================================================
 
         suggestions.append({
+
             "file": file_name,
+
+            "function_name": function_name,
+
             "previous_code": (
-                "No previous version available - this is new code."
+                "No previous version available - "
+                "this is new code."
             ),
-            "current_code": exact_current_code,
-            "suggested_code": suggested_code,
-            "reason": reason
+
+            "current_code": (
+                exact_current_code
+            ),
+
+            "suggested_code": (
+                suggested_function_code
+            ),
+
+            "reason": (
+                str(reason).strip()
+            )
         })
 
-    # ------------------------------------------------------------
-    # Final response
-    # ------------------------------------------------------------
+    # ============================================================
+    # FINAL RESPONSE
+    # ============================================================
 
     return json.dumps(
         {

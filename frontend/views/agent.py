@@ -230,10 +230,7 @@ def agent_view(page):
 
             def post_review(e):
 
-                result = post_ai_review(
-                    mr_id,
-                    review
-                )
+                result = post_ai_review(mr_id)
 
                 if result.get("status") == "posted":
 
