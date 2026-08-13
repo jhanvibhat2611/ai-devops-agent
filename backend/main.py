@@ -1736,14 +1736,18 @@ async def gitlab_webhook(payload: dict):
 
         # --------------------------------------------------------
         # Generate AI code suggestions
+        #
+        # PUSH EVENT:
+        # Do NOT use Elasticsearch MR context here.
         # --------------------------------------------------------
 
         print(
-            "\n🤖 Generating AI code suggestions..."
+            "\n🤖 Generating AI code suggestions for push..."
         )
 
         suggestion_response = suggest_code(
-            file_contents
+            file_contents,
+            []
         )
 
         try:
@@ -1862,10 +1866,13 @@ async def gitlab_webhook(payload: dict):
 
         mr_iid = attributes.get("iid")
         action = attributes.get("action")
+        mr_title = attributes.get("title", "")
+        mr_description = attributes.get("description", "")
 
         print(
             f"\n📌 Merge Request event received: !{mr_iid}"
         )
+
         print(
             f"Action: {action}"
         )
@@ -1883,6 +1890,10 @@ async def gitlab_webhook(payload: dict):
         # Get actual source files
         # --------------------------------------------------------
 
+        print(
+            "\n🔍 Getting current source files..."
+        )
+
         file_contents = get_merge_request_source_files(
             mr_iid
         )
@@ -1898,18 +1909,58 @@ async def gitlab_webhook(payload: dict):
                 "details": file_contents
             }
 
+        if not file_contents:
+
+            return {
+                "status": "completed",
+                "event_type": "merge_request",
+                "mr_iid": mr_iid,
+                "suggestions": []
+            }
+
         # --------------------------------------------------------
-        # Generate code suggestions
+        # Get related Merge Request context
+        #
+        # MR CODE SUGGESTION:
+        # This is where Elasticsearch context is used.
         # --------------------------------------------------------
 
+        print(
+            "\n🔍 Searching Elasticsearch for related Merge Requests..."
+        )
+
+        mr_context = get_mr_context_for_suggestions(
+            mr_iid,
+            mr_title,
+            mr_description
+        )
+
+        print(
+            f"✅ Found {len(mr_context)} related Merge Requests."
+        )
+
+        # --------------------------------------------------------
+        # Generate AI code suggestions
+        # --------------------------------------------------------
+
+        print(
+            "\n🤖 Generating context-aware AI code suggestions..."
+        )
+
         suggestion_response = suggest_code(
-            file_contents
+            file_contents,
+            mr_context
         )
 
         try:
 
             json_start = suggestion_response.find("{")
             json_end = suggestion_response.rfind("}") + 1
+
+            if json_start == -1 or json_end == 0:
+                raise ValueError(
+                    "No JSON object found in AI response."
+                )
 
             suggestion_data = json.loads(
                 suggestion_response[
@@ -1930,95 +1981,76 @@ async def gitlab_webhook(payload: dict):
             suggestions = []
 
         # --------------------------------------------------------
-        # Run existing LangGraph workflow
+        # No suggestions
         # --------------------------------------------------------
 
-        thread_id = str(uuid.uuid4())
+        if not suggestions:
 
-        config = {
-            "configurable": {
-                "thread_id": thread_id
-            }
-        }
-
-        workflow_result = graph.invoke(
-            {
-                "user_request": (
-                    f"review mr {mr_iid}"
-                )
-            },
-            config=config
-        )
-
-        interrupts = workflow_result.get(
-            "__interrupt__",
-            []
-        )
-
-        # --------------------------------------------------------
-        # Post suggestions to MR
-        # --------------------------------------------------------
-
-        if suggestions:
-
-            suggestion_text = (
-                "## 🤖 AI Code Suggestions\n\n"
+            print(
+                "ℹ️ No meaningful code improvements suggested."
             )
-
-            for index, suggestion in enumerate(
-                suggestions,
-                start=1
-            ):
-
-                suggestion_text += (
-                    f"### Suggestion {index}\n\n"
-                    f"**File:** "
-                    f"{suggestion.get('file', 'Unknown')}\n\n"
-                    f"**Current Code:**\n"
-                    f"```python\n"
-                    f"{suggestion.get('current_code', '')}\n"
-                    f"```\n\n"
-                    f"**Suggested Code:**\n"
-                    f"```python\n"
-                    f"{suggestion.get('suggested_code', '')}\n"
-                    f"```\n\n"
-                    f"**Reason:** "
-                    f"{suggestion.get('reason', '')}\n\n"
-                    "---\n\n"
-                )
-
-            post_ai_suggestion(
-                mr_iid,
-                suggestion_text
-            )
-
-        # --------------------------------------------------------
-        # Return workflow result
-        # --------------------------------------------------------
-
-        if interrupts:
-
-            approval_request = interrupts[0].value
 
             return {
-                "status": "waiting_for_approval",
+                "status": "completed",
                 "event_type": "merge_request",
                 "mr_iid": mr_iid,
-                "thread_id": thread_id,
-                "analysis": approval_request["analysis"],
-                "branch_name": approval_request["branch_name"],
-                "commit_message": approval_request["commit_message"],
-                "mr_title": approval_request["mr_title"],
-                "suggestions": suggestions
+                "suggestions": []
             }
 
+        # --------------------------------------------------------
+        # Post suggestions to GitLab MR
+        # --------------------------------------------------------
+
+        suggestion_text = (
+            "## 🤖 AI Code Suggestions\n\n"
+        )
+
+        for index, suggestion in enumerate(
+            suggestions,
+            start=1
+        ):
+
+            suggestion_text += (
+                f"### Suggestion {index}\n\n"
+                f"**File:** "
+                f"{suggestion.get('file', 'Unknown')}\n\n"
+                f"**Current Code:**\n"
+                f"```python\n"
+                f"{suggestion.get('current_code', '')}\n"
+                f"```\n\n"
+                f"**Suggested Code:**\n"
+                f"```python\n"
+                f"{suggestion.get('suggested_code', '')}\n"
+                f"```\n\n"
+                f"**Reason:** "
+                f"{suggestion.get('reason', '')}\n\n"
+                "---\n\n"
+            )
+
+        print(
+            "\n💬 Posting AI suggestions to GitLab..."
+        )
+
+        post_result = post_ai_suggestion(
+            mr_iid,
+            suggestion_text
+        )
+
+        print(
+            "GitLab suggestion response:"
+        )
+        print(post_result)
+
+        print(
+            "====================================\n"
+        )
+
         return {
-            "status": "completed",
+            "status": "suggestions_generated",
             "event_type": "merge_request",
+            "project": project_name,
             "mr_iid": mr_iid,
-            "thread_id": thread_id,
-            "suggestions": suggestions,
-            "workflow_result": workflow_result
+            "suggestions": suggestions
         }
 
     # ============================================================
