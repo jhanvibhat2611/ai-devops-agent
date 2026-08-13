@@ -172,6 +172,7 @@ def apply_ai_suggestion(
     current_code: str,
     suggested_code: str
 ):
+
     # ------------------------------------------------------------
     # Get Merge Request details
     # ------------------------------------------------------------
@@ -195,7 +196,7 @@ def apply_ai_suggestion(
         }
 
     # ------------------------------------------------------------
-    # Get the ACTUAL current file from GitLab
+    # Get the ACTUAL current file from the source branch
     # ------------------------------------------------------------
 
     file_endpoint = (
@@ -211,19 +212,22 @@ def apply_ai_suggestion(
 
     if "content" not in file_data:
         return {
-            "error": 404,
-            "message": (
-                f"Could not find file '{file_path}' "
-                "in the source branch."
-            )
+            "error": 500,
+            "message": "Could not retrieve the current file content."
         }
 
+    # ------------------------------------------------------------
+    # Decode the file
+    # ------------------------------------------------------------
+
     try:
+
         current_file_content = base64.b64decode(
             file_data["content"]
         ).decode("utf-8")
 
     except Exception:
+
         return {
             "error": 500,
             "message": (
@@ -232,194 +236,45 @@ def apply_ai_suggestion(
         }
 
     # ------------------------------------------------------------
-    # Clean accidental Git diff markers
+    # Normalize only line endings for comparison
     # ------------------------------------------------------------
 
-    clean_current_code = "\n".join(
-        line[1:] if line.startswith(("+", "-")) else line
-        for line in current_code.splitlines()
-    ).strip()
+    normalized_current_code = (
+        current_code
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
 
-    clean_suggested_code = "\n".join(
-        line[1:] if line.startswith(("+", "-")) else line
-        for line in suggested_code.splitlines()
-    ).strip()
+    normalized_file_content = (
+        current_file_content
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
 
-    if not clean_suggested_code:
+    # ------------------------------------------------------------
+    # Make sure the function has not changed
+    # ------------------------------------------------------------
+
+    if normalized_current_code not in normalized_file_content:
+
         return {
-            "error": 400,
-            "message": "Suggested code is empty."
+            "error": 409,
+            "message": (
+                "The selected code has changed since the "
+                "suggestion was generated. Please generate "
+                "a new suggestion before accepting it."
+            )
         }
 
     # ------------------------------------------------------------
-    # Normalize line endings
+    # Replace ONLY the selected function
     # ------------------------------------------------------------
 
-    actual_code = current_file_content.replace(
-        "\r\n",
-        "\n"
-    ).replace(
-        "\r",
-        "\n"
+    updated_file_content = normalized_file_content.replace(
+        normalized_current_code,
+        suggested_code.strip(),
+        1
     )
-
-    clean_current_code = clean_current_code.replace(
-        "\r\n",
-        "\n"
-    ).replace(
-        "\r",
-        "\n"
-    )
-
-    clean_suggested_code = clean_suggested_code.replace(
-        "\r\n",
-        "\n"
-    ).replace(
-        "\r",
-        "\n"
-    )
-
-    # ------------------------------------------------------------
-    # METHOD 1:
-    # Exact replacement using current_code from AI
-    # ------------------------------------------------------------
-
-    if clean_current_code and clean_current_code in actual_code:
-
-        updated_file_content = actual_code.replace(
-            clean_current_code,
-            clean_suggested_code,
-            1
-        )
-
-    else:
-
-        # --------------------------------------------------------
-        # METHOD 2:
-        # AI current_code was not exact.
-        #
-        # Try to identify the Python function being modified
-        # and replace that function in the real GitLab file.
-        # --------------------------------------------------------
-
-        import ast
-
-        try:
-            suggested_tree = ast.parse(
-                clean_suggested_code
-            )
-
-            suggested_functions = [
-                node
-                for node in ast.walk(suggested_tree)
-                if isinstance(
-                    node,
-                    (ast.FunctionDef, ast.AsyncFunctionDef)
-                )
-            ]
-
-        except SyntaxError:
-            suggested_functions = []
-
-        if not suggested_functions:
-
-            return {
-                "error": 409,
-                "message": (
-                    "The suggested code does not match the "
-                    "current version of the file, and the "
-                    "affected code section could not be "
-                    "identified safely."
-                )
-            }
-
-        function_name = suggested_functions[0].name
-
-        # --------------------------------------------------------
-        # Parse actual file
-        # --------------------------------------------------------
-
-        try:
-            actual_tree = ast.parse(actual_code)
-
-        except SyntaxError:
-            return {
-                "error": 500,
-                "message": (
-                    "The current file contains invalid Python "
-                    "syntax, so the suggestion could not be "
-                    "applied safely."
-                )
-            }
-
-        target_function = None
-
-        for node in ast.walk(actual_tree):
-
-            if isinstance(
-                node,
-                (ast.FunctionDef, ast.AsyncFunctionDef)
-            ) and node.name == function_name:
-
-                target_function = node
-                break
-
-        if target_function is None:
-
-            return {
-                "error": 409,
-                "message": (
-                    "The suggested code does not match the "
-                    "current version of the file. The affected "
-                    "function could not be identified safely."
-                )
-            }
-
-        # --------------------------------------------------------
-        # Replace only the identified function
-        # --------------------------------------------------------
-
-        lines = actual_code.splitlines(
-            keepends=True
-        )
-
-        start_line = target_function.lineno - 1
-        end_line = target_function.end_lineno
-
-        original_indent = len(
-            lines[start_line]
-        ) - len(
-            lines[start_line].lstrip()
-        )
-
-        suggested_lines = clean_suggested_code.splitlines()
-
-        # Ensure suggested function has the same indentation
-        if original_indent > 0:
-
-            indentation = " " * original_indent
-
-            suggested_lines = [
-                (
-                    indentation + line
-                    if line.strip()
-                    else line
-                )
-                for line in suggested_lines
-            ]
-
-        replacement = "\n".join(
-            suggested_lines
-        )
-
-        if lines[start_line].endswith("\n"):
-            replacement += "\n"
-
-        updated_file_content = (
-            "".join(lines[:start_line])
-            + replacement
-            + "".join(lines[end_line:])
-        )
 
     # ------------------------------------------------------------
     # Create GitLab commit
@@ -451,6 +306,7 @@ def apply_ai_suggestion(
     )
 
     if response.status_code == 201:
+
         return response.json()
 
     return {
@@ -826,7 +682,10 @@ def post_ai_suggestion(mr_iid: int, suggestion: str):
 @app.get("/suggest/{mr_iid}")
 async def suggest_merge_request(mr_iid: int):
 
-    # Get MR details
+    # ------------------------------------------------------------
+    # 1. Get Merge Request details
+    # ------------------------------------------------------------
+
     mr = make_gitlab_request(
         f"merge_requests/{mr_iid}"
     )
@@ -842,7 +701,10 @@ async def suggest_merge_request(mr_iid: int):
             "message": "Could not determine source branch."
         }
 
-    # Get changed files
+    # ------------------------------------------------------------
+    # 2. Get changed files
+    # ------------------------------------------------------------
+
     changes = get_merge_request_changes(mr_iid)
 
     if "error" in changes:
@@ -855,7 +717,10 @@ async def suggest_merge_request(mr_iid: int):
             "suggestions": []
         }
 
-    # Get ACTUAL current code from source branch
+    # ------------------------------------------------------------
+    # 3. Get ACTUAL current code from source branch
+    # ------------------------------------------------------------
+
     file_contents = []
 
     for change in changes["changes"]:
@@ -870,10 +735,15 @@ async def suggest_merge_request(mr_iid: int):
             source_branch
         )
 
-        if "error" in file_result:
+        # get_file_content() returns None if the file
+        # could not be retrieved.
+        if file_result is None:
             continue
 
-        file_contents.append(file_result)
+        file_contents.append({
+            "file": file_path,
+            "content": file_result
+        })
 
     if not file_contents:
         return {
@@ -882,22 +752,106 @@ async def suggest_merge_request(mr_iid: int):
             "suggestions": []
         }
 
-    # Send actual source code to AI
-    suggestion_response = suggest_code(file_contents)
+    # ------------------------------------------------------------
+    # 4. Search Elasticsearch for related Merge Requests
+    # ------------------------------------------------------------
+
+    print(
+        "\n🔍 Searching Elasticsearch for related Merge Requests..."
+    )
+
+    query_parts = []
+
+    if mr.get("title"):
+        query_parts.append(
+            mr.get("title")
+        )
+
+    if mr.get("description"):
+        query_parts.append(
+            mr.get("description")
+        )
+
+    search_query = " ".join(
+        query_parts
+    ).strip()
+
+    mr_context = []
+
+    if search_query:
+
+        try:
+
+            mr_context = search_merge_requests(
+                search_query
+            )
+
+            # Do not use the current MR as its own context.
+            mr_context = [
+                related_mr
+                for related_mr in mr_context
+                if str(
+                    related_mr.get("mr_id")
+                ) != str(mr_iid)
+            ]
+
+            # Keep only a small amount of relevant context.
+            mr_context = mr_context[:3]
+
+        except Exception as e:
+
+            print(
+                "⚠️ Elasticsearch search failed:",
+                e
+            )
+
+            mr_context = []
+
+    print(
+        f"✅ Found {len(mr_context)} related Merge Requests."
+    )
+
+    # ------------------------------------------------------------
+    # 5. Generate context-aware AI suggestions
+    # ------------------------------------------------------------
+
+    print(
+        "\n🤖 Generating context-aware AI code suggestions..."
+    )
+
+    suggestion_response = suggest_code(
+        file_contents,
+        mr_context
+    )
+
+    # ------------------------------------------------------------
+    # 6. Parse AI response
+    # ------------------------------------------------------------
 
     try:
-        parsed_response = json.loads(suggestion_response)
-        suggestions = parsed_response.get("suggestions", [])
+
+        parsed_response = json.loads(
+            suggestion_response
+        )
+
+        suggestions = parsed_response.get(
+            "suggestions",
+            []
+        )
 
     except json.JSONDecodeError:
+
         suggestions = []
+
+    # ------------------------------------------------------------
+    # 7. Return suggestions
+    # ------------------------------------------------------------
 
     return {
         "type": "suggestion",
         "mr_iid": mr_iid,
         "suggestions": suggestions
     }
-
 @app.post("/chat")
 async def chat(request: ChatRequest):
 
@@ -1014,7 +968,7 @@ async def chat(request: ChatRequest):
         # Send actual source code to AI
         # --------------------------------------------------------
 
-        suggestion_text = suggest_code(files)
+        suggestion_text = suggest_code(files, [])
 
         # --------------------------------------------------------
         # Parse AI JSON response
@@ -1233,10 +1187,7 @@ async def gitlab_webhook(payload: dict):
 
     event_type = payload.get("object_kind")
     project_name = payload.get("project", {}).get("name")
-    branch = payload.get("ref", "").replace(
-        "refs/heads/",
-        ""
-    )
+    branch = payload.get("ref", "").replace("refs/heads/", "")
     commit_sha = payload.get("after")
     user_name = payload.get("user_name")
 
@@ -1247,6 +1198,36 @@ async def gitlab_webhook(payload: dict):
     print("User:", user_name)
 
     # ============================================================
+    # IGNORE COMMITS CREATED BY "ACCEPT SUGGESTION"
+    # ============================================================
+
+    commits = payload.get("commits", [])
+
+    for commit in commits:
+
+        commit_message = commit.get("message", "")
+
+        if commit_message.startswith("Apply AI code suggestion"):
+
+            print(
+                "📌 AI suggestion commit detected."
+            )
+
+            print(
+                "ℹ️ Push detected from accepted suggestion."
+            )
+
+            print(
+                "ℹ️ AI review/suggestion will NOT be triggered."
+            )
+
+            return {
+                "status": "ignored",
+                "reason": "AI suggestion commit",
+                "commit_sha": commit_sha
+            }
+
+    # ============================================================
     # PUSH EVENT
     # ============================================================
 
@@ -1254,21 +1235,194 @@ async def gitlab_webhook(payload: dict):
 
         print("\n📌 Push event received.")
 
+        # --------------------------------------------------------
+        # Find open Merge Request for this branch
+        # --------------------------------------------------------
+
         print(
-            "ℹ️ Push detected. "
-            "AI review will NOT be triggered automatically."
+            "\n🔍 Finding open Merge Request..."
+        )
+
+        merge_requests = get_merge_request_for_branch(branch)
+
+        if (
+            not isinstance(merge_requests, list)
+            or not merge_requests
+        ):
+
+            print(
+                "⚠️ No open Merge Request found for this branch."
+            )
+
+            return {
+                "status": "received",
+                "message": (
+                    "No open Merge Request found for this branch."
+                ),
+                "branch": branch,
+                "commit_sha": commit_sha
+            }
+
+        mr = merge_requests[0]
+        mr_iid = mr["iid"]
+
+        print(
+            f"✅ Found Merge Request: !{mr_iid}"
+        )
+
+        # --------------------------------------------------------
+        # Get actual source files from MR source branch
+        # --------------------------------------------------------
+
+        print(
+            "\n🔍 Getting current source files..."
+        )
+
+        file_contents = get_merge_request_source_files(
+            mr_iid
+        )
+
+        if (
+            isinstance(file_contents, dict)
+            and "error" in file_contents
+        ):
+
+            print(
+                "❌ Failed to get source files:"
+            )
+            print(file_contents)
+
+            return {
+                "status": "error",
+                "message": "Failed to get source files.",
+                "details": file_contents
+            }
+
+        if not file_contents:
+
+            print(
+                "⚠️ No source files found."
+            )
+
+            return {
+                "status": "received",
+                "message": "No source files found.",
+                "mr_iid": mr_iid
+            }
+
+        # --------------------------------------------------------
+        # Generate AI code suggestions
+        # --------------------------------------------------------
+
+        print(
+            "\n🤖 Generating AI code suggestions..."
+        )
+
+        suggestion_response = suggest_code(
+            file_contents
+        )
+
+        try:
+
+            json_start = suggestion_response.find("{")
+            json_end = suggestion_response.rfind("}") + 1
+
+            if json_start == -1 or json_end == 0:
+                raise ValueError(
+                    "No JSON object found in AI response."
+                )
+
+            suggestion_data = json.loads(
+                suggestion_response[
+                    json_start:json_end
+                ]
+            )
+
+            suggestions = suggestion_data.get(
+                "suggestions",
+                []
+            )
+
+        except (
+            json.JSONDecodeError,
+            ValueError
+        ):
+
+            suggestions = []
+
+        # --------------------------------------------------------
+        # No suggestions
+        # --------------------------------------------------------
+
+        if not suggestions:
+
+            print(
+                "ℹ️ No meaningful code improvements suggested."
+            )
+
+            return {
+                "status": "completed",
+                "event_type": "push",
+                "mr_iid": mr_iid,
+                "suggestions": []
+            }
+
+        # --------------------------------------------------------
+        # Post suggestions to GitLab MR
+        # --------------------------------------------------------
+
+        suggestion_text = (
+            "## 🤖 AI Code Suggestions\n\n"
+        )
+
+        for index, suggestion in enumerate(
+            suggestions,
+            start=1
+        ):
+
+            suggestion_text += (
+                f"### Suggestion {index}\n\n"
+                f"**File:** "
+                f"{suggestion.get('file', 'Unknown')}\n\n"
+                f"**Current Code:**\n"
+                f"```python\n"
+                f"{suggestion.get('current_code', '')}\n"
+                f"```\n\n"
+                f"**Suggested Code:**\n"
+                f"```python\n"
+                f"{suggestion.get('suggested_code', '')}\n"
+                f"```\n\n"
+                f"**Reason:** "
+                f"{suggestion.get('reason', '')}\n\n"
+                "---\n\n"
+            )
+
+        print(
+            "\n💬 Posting AI suggestions to GitLab..."
+        )
+
+        post_result = post_ai_suggestion(
+            mr_iid,
+            suggestion_text
+        )
+
+        print(
+            "GitLab suggestion response:"
+        )
+        print(post_result)
+
+        print(
+            "====================================\n"
         )
 
         return {
-            "status": "received",
+            "status": "suggestions_generated",
             "event_type": "push",
             "project": project_name,
             "branch": branch,
             "commit_sha": commit_sha,
-            "message": (
-                "Push received. "
-                "No automatic AI review triggered."
-            )
+            "mr_iid": mr_iid,
+            "suggestions": suggestions
         }
 
     # ============================================================
@@ -1277,152 +1431,170 @@ async def gitlab_webhook(payload: dict):
 
     if event_type == "merge_request":
 
-        print("\n📌 Merge Request event received.")
-
-        # --------------------------------------------------------
-        # Get Merge Request information
-        # --------------------------------------------------------
-
         attributes = payload.get(
             "object_attributes",
             {}
         )
 
         mr_iid = attributes.get("iid")
+        action = attributes.get("action")
+
+        print(
+            f"\n📌 Merge Request event received: !{mr_iid}"
+        )
+        print(
+            f"Action: {action}"
+        )
 
         if not mr_iid:
 
-            print(
-                "❌ Could not determine Merge Request IID."
-            )
-
             return {
                 "status": "error",
                 "message": (
-                    "Merge Request IID not found in webhook payload."
+                    "Merge Request IID not found."
                 )
             }
 
-        print(
-            f"✅ Merge Request found: !{mr_iid}"
-        )
-
         # --------------------------------------------------------
-        # Get Merge Request changes
+        # Get actual source files
         # --------------------------------------------------------
 
-        print(
-            "\n🔍 Getting Merge Request changes from GitLab..."
+        file_contents = get_merge_request_source_files(
+            mr_iid
         )
-
-        changes = get_merge_request_changes(mr_iid)
 
         if (
-            not isinstance(changes, dict)
-            or "changes" not in changes
+            isinstance(file_contents, dict)
+            and "error" in file_contents
         ):
-
-            print(
-                "❌ Failed to get Merge Request changes:"
-            )
-            print(changes)
 
             return {
                 "status": "error",
-                "message": (
-                    "Failed to get Merge Request changes."
-                ),
-                "details": changes
+                "message": "Failed to get MR source files.",
+                "details": file_contents
             }
 
-        if not changes["changes"]:
+        # --------------------------------------------------------
+        # Generate code suggestions
+        # --------------------------------------------------------
 
-            print(
-                "⚠️ No changes found in Merge Request."
+        suggestion_response = suggest_code(
+            file_contents
+        )
+
+        try:
+
+            json_start = suggestion_response.find("{")
+            json_end = suggestion_response.rfind("}") + 1
+
+            suggestion_data = json.loads(
+                suggestion_response[
+                    json_start:json_end
+                ]
             )
+
+            suggestions = suggestion_data.get(
+                "suggestions",
+                []
+            )
+
+        except (
+            json.JSONDecodeError,
+            ValueError
+        ):
+
+            suggestions = []
+
+        # --------------------------------------------------------
+        # Run existing LangGraph workflow
+        # --------------------------------------------------------
+
+        thread_id = str(uuid.uuid4())
+
+        config = {
+            "configurable": {
+                "thread_id": thread_id
+            }
+        }
+
+        workflow_result = graph.invoke(
+            {
+                "user_request": (
+                    f"review mr {mr_iid}"
+                )
+            },
+            config=config
+        )
+
+        interrupts = workflow_result.get(
+            "__interrupt__",
+            []
+        )
+
+        # --------------------------------------------------------
+        # Post suggestions to MR
+        # --------------------------------------------------------
+
+        if suggestions:
+
+            suggestion_text = (
+                "## 🤖 AI Code Suggestions\n\n"
+            )
+
+            for index, suggestion in enumerate(
+                suggestions,
+                start=1
+            ):
+
+                suggestion_text += (
+                    f"### Suggestion {index}\n\n"
+                    f"**File:** "
+                    f"{suggestion.get('file', 'Unknown')}\n\n"
+                    f"**Current Code:**\n"
+                    f"```python\n"
+                    f"{suggestion.get('current_code', '')}\n"
+                    f"```\n\n"
+                    f"**Suggested Code:**\n"
+                    f"```python\n"
+                    f"{suggestion.get('suggested_code', '')}\n"
+                    f"```\n\n"
+                    f"**Reason:** "
+                    f"{suggestion.get('reason', '')}\n\n"
+                    "---\n\n"
+                )
+
+            post_ai_suggestion(
+                mr_iid,
+                suggestion_text
+            )
+
+        # --------------------------------------------------------
+        # Return workflow result
+        # --------------------------------------------------------
+
+        if interrupts:
+
+            approval_request = interrupts[0].value
 
             return {
-                "status": "received",
+                "status": "waiting_for_approval",
                 "event_type": "merge_request",
                 "mr_iid": mr_iid,
-                "message": "No changes found."
+                "thread_id": thread_id,
+                "analysis": approval_request["analysis"],
+                "branch_name": approval_request["branch_name"],
+                "commit_message": approval_request["commit_message"],
+                "mr_title": approval_request["mr_title"],
+                "suggestions": suggestions
             }
 
-        # --------------------------------------------------------
-        # Build diff for AI review
-        # --------------------------------------------------------
-
-        diff_text = ""
-
-        for change in changes["changes"]:
-
-            file_path = change.get(
-                "new_path",
-                "Unknown"
-            )
-
-            file_diff = change.get(
-                "diff",
-                ""
-            )
-
-            diff_text += (
-                f"\n===== FILE: {file_path} =====\n"
-                f"{file_diff}\n"
-                f"===== END FILE =====\n"
-            )
-
-        print(
-            "\n========== CODE DIFF =========="
-        )
-        print(diff_text)
-
-        # --------------------------------------------------------
-        # AI CODE REVIEW
-        # --------------------------------------------------------
-
-        print(
-            "\n========== AI REVIEW =========="
-        )
-        print(
-            "🤖 Sending Merge Request changes to AI..."
-        )
-
-        review = review_code(diff_text)
-
-        print(
-            "\n===== AI REVIEW RESULT ====="
-        )
-        print(review)
-
-        # --------------------------------------------------------
-        # Post review to GitLab MR
-        # --------------------------------------------------------
-
-        print(
-            "\n💬 Posting AI review to GitLab..."
-        )
-
-        comment_result = post_ai_review(
-            mr_iid,
-            review
-        )
-
-        print(
-            "GitLab comment response:"
-        )
-        print(comment_result)
-
-        print(
-            "====================================\n"
-        )
-
         return {
-            "status": "reviewed",
+            "status": "completed",
             "event_type": "merge_request",
-            "project": project_name,
             "mr_iid": mr_iid,
-            "review": review
+            "thread_id": thread_id,
+            "suggestions": suggestions,
+            "workflow_result": workflow_result
         }
 
     # ============================================================
@@ -1430,11 +1602,10 @@ async def gitlab_webhook(payload: dict):
     # ============================================================
 
     print(
-        f"⚠️ Ignoring unsupported webhook event: {event_type}"
+        f"ℹ️ Ignoring unsupported event type: {event_type}"
     )
 
     return {
         "status": "ignored",
-        "event_type": event_type,
-        "message": "Webhook event not handled."
+        "event_type": event_type
     }

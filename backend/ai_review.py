@@ -1,6 +1,8 @@
 from langchain_ollama import ChatOllama
 import os
 from dotenv import load_dotenv
+import json
+import ast
 
 load_dotenv()
 
@@ -47,265 +49,375 @@ Git Diff:
     return response.content
 
 
-def suggest_code(file_contents: list):
+def suggest_code(file_contents: list, mr_context: list):
 
-    files_text = ""
+    suggestions = []
 
     for file in file_contents:
-        files_text += (
-            f"\n===== FILE: {file.get('file', 'Unknown')} =====\n"
-            f"{file.get('content', '')}\n"
-            f"===== END FILE =====\n"
-        )
 
-    prompt = f"""
-You are a senior Python developer reviewing source code from a Merge Request.
+        file_name = file.get("file", "Unknown")
+        source_code = file.get("content", "")
 
-Analyze ONLY the actual Python source code provided below.
+        if not source_code.strip():
+            continue
 
-Your job is to identify REAL, PRACTICAL, and JUSTIFIED improvements.
+        # ------------------------------------------------------------
+        # Extract Python functions from the source code
+        # ------------------------------------------------------------
+
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError:
+            print(f"⚠️ Could not parse {file_name} as Python.")
+            continue
+
+        functions = []
+
+        for node in ast.walk(tree):
+
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+
+                current_code = ast.get_source_segment(
+                    source_code,
+                    node
+                )
+
+                if current_code:
+                    functions.append({
+                        "name": node.name,
+                        "code": current_code
+                    })
+
+        if not functions:
+            continue
+
+        # ------------------------------------------------------------
+        # Build function context for the AI
+        # ------------------------------------------------------------
+
+        functions_text = ""
+
+        for function in functions:
+
+            functions_text += (
+                f"\n===== FUNCTION: {function['name']} =====\n"
+                f"{function['code']}\n"
+                f"===== END FUNCTION =====\n"
+            )
+
+        # ------------------------------------------------------------
+        # Build Merge Request context
+        # ------------------------------------------------------------
+
+        context_text = ""
+
+        if mr_context:
+
+            for mr in mr_context:
+
+                context_text += f"""
+Title: {mr.get("title", "")}
+Description: {mr.get("description", "")}
+Author: {mr.get("author", "")}
+"""
+
+        else:
+
+            context_text = "No related Merge Request context was found."
+
+        # ------------------------------------------------------------
+        # AI prompt
+        # ------------------------------------------------------------
+
+        prompt = f"""
+You are a senior Python developer reviewing code from a Merge Request.
+
+Analyze ONLY the Python functions provided below.
+
+Your job is to identify ONE REAL, PRACTICAL, and JUSTIFIED improvement.
 
 Focus on:
 
-- code quality
+- duplicated code
+- unnecessary variables
+- unnecessary operations
 - readability
 - maintainability
 - Python best practices
-- type hints when genuinely useful
-- meaningful naming improvements
-- unnecessary variables
-- unnecessary operations
-- duplicated or redundant code
-- error handling when genuinely needed
-- logging when genuinely useful
-- security when relevant
+- meaningful error handling
+- meaningful type hints
+- security issues when relevant
 
-IMPORTANT RULES:
+Do NOT make changes merely for style.
 
-1. The provided content is the CURRENT source code from the Merge Request
-   source branch.
+Do NOT introduce unnecessary complexity.
 
-2. Treat the provided content as NORMAL SOURCE CODE.
-   It is NOT a Git diff.
+Do NOT invent requirements.
 
-3. NEVER add Git diff formatting.
+Do NOT change behavior unless the change genuinely improves the code.
 
-Do NOT use:
+============================================================
+IMPORTANT
+============================================================
 
-- "+" prefixes
-- "-" prefixes
-- "@@" headers
-- Git diff syntax
+The source code below is the ACTUAL source code from the
+Merge Request.
 
-4. Do NOT invent previous code.
+Each function is provided exactly as it exists in the file.
 
-5. For a NEW file, use exactly:
+You must choose AT MOST ONE function to improve.
 
-"No previous version available - this is new code."
-
-------------------------------------------------------------
-CURRENT_CODE RULES
-------------------------------------------------------------
-
-6. current_code MUST contain the EXACT relevant code copied from
-   the provided source.
-
-7. current_code is used by the application to verify that the file
-   has not changed before applying a suggestion.
-
-8. Therefore, current_code MUST NOT be modified in ANY way.
-
-9. When copying current_code:
-
-- Do not remove lines.
-- Do not add lines.
-- Do not reorder lines.
-- Do not remove duplicate lines.
-- Do not change indentation.
-- Do not change spacing.
-- Do not change quotes.
-- Do not reformat the code.
-- Do not simplify the code.
-- Do not correct mistakes.
-- Do not improve the code.
-
-10. If the source contains duplicate statements, current_code MUST
-    contain those duplicate statements exactly as provided.
-
-11. If the source contains poor formatting, current_code MUST preserve
-    that formatting.
-
-12. ONLY suggested_code may contain changes.
-
-------------------------------------------------------------
-SUGGESTED_CODE RULES
-------------------------------------------------------------
-
-13. suggested_code MUST contain normal Python source code only.
-
-14. suggested_code MUST NOT contain:
-
-- "+" prefixes
-- "-" prefixes
-- "@@" headers
-- Markdown
-- Markdown code fences
-- explanations
-- Git diff formatting
-
-15. suggested_code must contain ONLY the improved version of the
-    relevant code section.
-
-16. suggested_code must actually fix the problem described in reason.
-
-17. Do NOT preserve a problem that the suggestion claims to fix.
-
-For example, if the current code contains:
-
-print(name)
-print(name)
-
-and the reason says the duplicate print is unnecessary, then
-suggested_code MUST NOT contain both print statements.
-
-18. If duplicate or redundant code is the actual problem, remove the
-    redundancy when doing so provides a clear practical benefit.
-
-19. Do NOT add error handling merely because something COULD theoretically
-    fail.
-
-20. Do NOT add default values for missing dictionary keys unless the
-    source code gives a genuine reason that missing keys should be handled.
-
-21. Do NOT add type hints merely to make the code look more professional.
-
-22. Do NOT add complexity that is unrelated to the actual problem.
-
-23. Preserve the intended behavior of the original code unless changing
-    the behavior is genuinely necessary to fix the identified issue.
-
-24. Prefer the SMALLEST practical change that meaningfully improves
-    the code.
-
-------------------------------------------------------------
-SUGGESTION COUNT
-------------------------------------------------------------
-
-25. Return ONLY ONE strongest suggestion for each file.
-
-26. NEVER return multiple suggestions for the same file.
-
-27. If several improvements are possible, combine only closely related
-    improvements into ONE practical suggestion.
-
-28. Do NOT create a suggestion merely for stylistic preference.
-
-29. Only suggest a change when there is a clear practical benefit.
-
-30. If there is no meaningful improvement for a file, do not create
-    a suggestion for that file.
-
-31. If there are no meaningful improvements across all files, return:
+If there is no meaningful improvement, return:
 
 {{
     "suggestions": []
 }}
 
-------------------------------------------------------------
-REASON RULES
-------------------------------------------------------------
+============================================================
+CURRENT CODE RULE
+============================================================
 
-32. The reason MUST accurately describe what changed in suggested_code.
+The backend will determine the exact current_code itself.
 
-33. Do NOT claim that type hints were added unless suggested_code actually
-    contains type hints.
+Therefore:
 
-34. Do NOT claim that error handling was added unless suggested_code
-    actually contains error handling.
+DO NOT return current_code.
 
-35. Do NOT claim that duplicate code was removed unless suggested_code
-    actually removes the duplicate code.
+DO NOT rewrite or copy the current function into the response.
 
-36. Do NOT claim that readability was improved unless there is an actual
-    meaningful readability improvement.
+Only identify the function by its exact function name.
 
-------------------------------------------------------------
-NEW FILE RULE
-------------------------------------------------------------
+============================================================
+SUGGESTED CODE RULE
+============================================================
 
-37. For a NEW file, previous_code MUST be exactly:
+suggested_code MUST contain the COMPLETE improved version of
+the selected function.
 
-"No previous version available - this is new code."
+For example, if the original function is:
 
-38. Do NOT invent a previous version for a new file.
+def find_user(user):
+    if user.get("name") == "admin":
+        return True
+    else:
+        return False
 
-------------------------------------------------------------
+and the improvement is to simplify it, suggested_code must be:
+
+def find_user(user):
+    return user.get("name") == "admin"
+
+NOT:
+
+return user.get("name") == "admin"
+
+The suggested_code must remain a complete valid Python function.
+
+Do NOT include:
+
+- Git diff markers
+- "+"
+- "-"
+- "@@"
+- Markdown
+- Markdown code fences
+- explanations inside suggested_code
+
+============================================================
+REASON RULE
+============================================================
+
+The reason must accurately describe the actual change.
+
+Do not claim that:
+
+- duplicate code was removed unless it was removed
+- error handling was added unless it was added
+- type hints were added unless they were added
+- readability was improved unless there is an actual improvement
+
+============================================================
+MERGE REQUEST CONTEXT
+============================================================
+
+The following Merge Requests were retrieved from Elasticsearch:
+
+{context_text}
+
+Use this context only when it is relevant.
+
+============================================================
+FUNCTIONS TO REVIEW
+============================================================
+
+File: {file_name}
+
+{functions_text}
+
+============================================================
 OUTPUT FORMAT
-------------------------------------------------------------
+============================================================
 
-39. Return ONLY valid JSON.
+Return ONLY valid JSON.
 
-40. Do NOT wrap the JSON in Markdown.
-
-41. Do NOT use ```json.
-
-42. Do NOT include any text before or after the JSON.
-
-43. Use exactly this structure:
+Return exactly:
 
 {{
     "suggestions": [
         {{
-            "file": "filename.py",
-            "previous_code": "No previous version available - this is new code.",
-            "current_code": "EXACT unchanged source code",
-            "suggested_code": "improved Python code only",
-            "reason": "accurate explanation of the practical improvement"
+            "function_name": "exact_function_name",
+            "suggested_code": "complete improved function",
+            "reason": "accurate explanation"
         }}
     ]
 }}
 
-For an EXISTING file:
+OR:
 
-- previous_code may contain a previous version ONLY if an actual
-  previous version is available.
-- Never invent a previous version.
+{{
+    "suggestions": []
+}}
 
-For a NEW file:
-
-- previous_code MUST be:
-  "No previous version available - this is new code."
-
-------------------------------------------------------------
-FINAL VALIDATION BEFORE RESPONDING
-------------------------------------------------------------
-
-Before returning the JSON, verify:
-
-1. current_code is copied exactly from the provided source.
-2. current_code contains all original duplicate lines.
-3. suggested_code is valid Python.
-4. suggested_code contains no Git diff markers.
-5. suggested_code actually improves the code.
-6. suggested_code actually fixes the problem mentioned in reason.
-7. The reason matches the actual changes.
-8. There is only ONE suggestion per file.
-9. No unnecessary complexity was introduced.
-10. The response is valid JSON only.
-
-Source Code:
-
-{files_text}
+Do not return anything outside the JSON object.
 """
 
-    print("========== SOURCE CODE SENT TO MODEL ==========")
-    print(files_text)
-    print("===============================================")
+        print(
+            "\n========== SOURCE FUNCTIONS SENT TO MODEL =========="
+        )
+        print(functions_text)
+        print("=====================================================")
 
-    response = llm2.invoke(prompt)
+        response = llm2.invoke(prompt)
 
-    print("========== MODEL RESPONSE ==========")
-    print(response.content)
-    print("====================================")
+        print("\n========== MODEL RESPONSE ==========")
+        print(response.content)
+        print("====================================")
 
-    return response.content
+        # ------------------------------------------------------------
+        # Parse AI response
+        # ------------------------------------------------------------
+
+        try:
+
+            response_text = response.content.strip()
+
+            # Remove accidental markdown fences if Ollama adds them
+            if response_text.startswith("```"):
+                response_text = response_text.replace(
+                    "```json",
+                    "",
+                    1
+                ).replace(
+                    "```",
+                    "",
+                    1
+                ).strip()
+
+            json_start = response_text.find("{")
+            json_end = response_text.rfind("}") + 1
+
+            if json_start == -1 or json_end == 0:
+                continue
+
+            parsed = json.loads(
+                response_text[json_start:json_end]
+            )
+
+        except json.JSONDecodeError:
+
+            print(
+                f"⚠️ Invalid JSON returned for {file_name}"
+            )
+
+            continue
+
+        ai_suggestions = parsed.get(
+            "suggestions",
+            []
+        )
+
+        if not ai_suggestions:
+            continue
+
+        # ------------------------------------------------------------
+        # Only ONE suggestion per file
+        # ------------------------------------------------------------
+
+        suggestion = ai_suggestions[0]
+
+        function_name = suggestion.get(
+            "function_name"
+        )
+
+        suggested_code = suggestion.get(
+            "suggested_code"
+        )
+
+        reason = suggestion.get(
+            "reason"
+        )
+
+        if not function_name or not suggested_code:
+            continue
+
+        # ------------------------------------------------------------
+        # Find the EXACT original function
+        # ------------------------------------------------------------
+
+        matching_function = None
+
+        for function in functions:
+
+            if function["name"] == function_name:
+
+                matching_function = function
+                break
+
+        if not matching_function:
+            print(
+                f"⚠️ AI selected unknown function "
+                f"{function_name}"
+            )
+            continue
+
+        exact_current_code = matching_function["code"]
+
+        # ------------------------------------------------------------
+        # Validate suggested code
+        # ------------------------------------------------------------
+
+        try:
+            ast.parse(suggested_code)
+        except SyntaxError:
+
+            print(
+                f"⚠️ AI returned invalid Python for "
+                f"{function_name}"
+            )
+
+            continue
+
+        # ------------------------------------------------------------
+        # Final suggestion
+        # ------------------------------------------------------------
+
+        suggestions.append({
+            "file": file_name,
+            "previous_code": (
+                "No previous version available - this is new code."
+            ),
+            "current_code": exact_current_code,
+            "suggested_code": suggested_code,
+            "reason": reason
+        })
+
+    # ------------------------------------------------------------
+    # Final response
+    # ------------------------------------------------------------
+
+    return json.dumps(
+        {
+            "suggestions": suggestions
+        },
+        indent=4
+    )
