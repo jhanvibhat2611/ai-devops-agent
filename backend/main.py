@@ -3,6 +3,7 @@ import requests
 from dotenv import load_dotenv
 import os
 import json
+import re
 from pydantic import BaseModel
 from elasticsearch_client import (
     index_merge_request,
@@ -10,7 +11,8 @@ from elasticsearch_client import (
     merge_request_exists,
     get_merge_request_from_es,
     update_merge_request,
-    bulk_index_merge_requests
+    bulk_index_merge_requests,
+    get_mr_context_for_suggestions
 )
 from ai_review import review_code,suggest_code
 import uuid
@@ -21,6 +23,7 @@ from langgraph.types import Command
 from workflow.graph import graph
 import base64
 from urllib.parse import quote
+chat_sessions = {}
 # created a FastAPI application
 app = FastAPI()
 
@@ -51,7 +54,7 @@ class CommentRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
-
+    thread_id: str | None = None
 
 class ChatDecisionRequest(BaseModel):
     thread_id: str
@@ -165,7 +168,23 @@ def get_merge_request_source_branch(mr_iid: int):
     return {
         "source_branch": mr["source_branch"]
     }
+def get_open_merge_requests():
 
+    endpoint = (
+        "merge_requests"
+        "?state=opened"
+        "&per_page=20"
+    )
+
+    result = make_gitlab_request(endpoint)
+
+    if isinstance(result, dict) and "error" in result:
+        return result
+
+    if not isinstance(result, list):
+        return []
+
+    return result
 def apply_ai_suggestion(
     mr_iid: int,
     file_path: str,
@@ -857,40 +876,465 @@ async def chat(request: ChatRequest):
 
     message = request.message.strip()
 
+    if not message:
+        return {
+            "status": "error",
+            "message": "Please enter a message."
+        }
+
     # ============================================================
-    # AI CODE REVIEW REQUEST
+    # CONVERSATION / THREAD SETUP
     # ============================================================
 
-    if message.lower().startswith("review mr"):
+    thread_id = request.thread_id
 
-        parts = message.split()
+    if not thread_id:
+        thread_id = str(uuid.uuid4())
 
-        if len(parts) < 3 or not parts[2].isdigit():
+    session = chat_sessions.setdefault(
+        thread_id,
+        {}
+    )
+
+    lower_message = message.lower()
+
+    # ============================================================
+    # CONVERSATIONAL MR REVIEW REQUEST
+    # ============================================================
+
+    # Example:
+    # "I want to review an MR"
+    # "Can you review a merge request?"
+    #
+    # We only enter this block when the user has NOT
+    # already provided an MR number.
+
+    if (
+        "review" in lower_message
+        and (
+            "mr" in lower_message
+            or "merge request" in lower_message
+        )
+        and not re.search(
+            r"(?:mr|merge request)\s*!?\d+",
+            lower_message
+        )
+    ):
+
+        merge_requests = get_open_merge_requests()
+
+        if (
+            isinstance(merge_requests, dict)
+            and "error" in merge_requests
+        ):
             return {
-                "type": "review",
-                "mr_iid": None,
-                "review": "Please provide a valid Merge Request ID."
+                "type": "conversation",
+                "thread_id": thread_id,
+                "message": (
+                    "I couldn't retrieve the open "
+                    "Merge Requests."
+                )
             }
 
-        mr_iid = int(parts[2])
+        if not merge_requests:
 
-        changes = get_merge_request_changes(mr_iid)
+            return {
+                "type": "conversation",
+                "thread_id": thread_id,
+                "message": (
+                    "There are currently no open "
+                    "Merge Requests."
+                )
+            }
 
-        if "changes" not in changes:
+        session["intent"] = "review"
+
+        mr_list = []
+
+        for mr in merge_requests:
+
+            mr_list.append({
+                "mr_iid": mr.get("iid"),
+                "title": mr.get("title", ""),
+                "source_branch": mr.get(
+                    "source_branch",
+                    ""
+                )
+            })
+
+        return {
+            "type": "mr_selection",
+            "thread_id": thread_id,
+            "intent": "review",
+            "message": (
+                "Sure! Which Merge Request "
+                "would you like me to review?"
+            ),
+            "merge_requests": mr_list
+        }
+
+    # ============================================================
+    # CONVERSATIONAL MR SUGGESTION REQUEST
+    # ============================================================
+
+    # Example:
+    # "I want code suggestions for an MR"
+    # "Give me suggestions for a merge request"
+    #
+    # Again, only trigger this when an MR number
+    # was NOT already provided.
+
+    if (
+        "suggest" in lower_message
+        and (
+            "mr" in lower_message
+            or "merge request" in lower_message
+        )
+        and not re.search(
+            r"(?:mr|merge request)\s*!?\d+",
+            lower_message
+        )
+    ):
+
+        merge_requests = get_open_merge_requests()
+
+        if (
+            isinstance(merge_requests, dict)
+            and "error" in merge_requests
+        ):
+            return {
+                "type": "conversation",
+                "thread_id": thread_id,
+                "message": (
+                    "I couldn't retrieve the open "
+                    "Merge Requests."
+                )
+            }
+
+        if not merge_requests:
+
+            return {
+                "type": "conversation",
+                "thread_id": thread_id,
+                "message": (
+                    "There are currently no open "
+                    "Merge Requests."
+                )
+            }
+
+        session["intent"] = "suggestion"
+
+        mr_list = []
+
+        for mr in merge_requests:
+
+            mr_list.append({
+                "mr_iid": mr.get("iid"),
+                "title": mr.get("title", ""),
+                "source_branch": mr.get(
+                    "source_branch",
+                    ""
+                )
+            })
+
+        return {
+            "type": "mr_selection",
+            "thread_id": thread_id,
+            "intent": "suggestion",
+            "message": (
+                "Sure! Which Merge Request would "
+                "you like code suggestions for?"
+            ),
+            "merge_requests": mr_list
+        }
+
+    # ============================================================
+    # USER SELECTED AN MR FROM THE CONVERSATION
+    # ============================================================
+
+    # Example:
+    #
+    # User:
+    # "I want code suggestions for an MR"
+    #
+    # Bot:
+    # "Which MR?"
+    #
+    # User:
+    # "18"
+    #
+    # The session remembers that the user wanted
+    # a suggestion, so 18 means MR !18.
+
+    if message.isdigit() and session.get("intent"):
+
+        mr_iid = int(message)
+
+        intent = session.get("intent")
+
+        # Clear the pending intent because the user
+        # has now selected the MR.
+        session.pop("intent", None)
+
+        # --------------------------------------------------------
+        # REVIEW SELECTED MR
+        # --------------------------------------------------------
+
+        if intent == "review":
+
+            changes = get_merge_request_changes(
+                mr_iid
+            )
+
+            if "changes" not in changes:
+
+                return {
+                    "type": "review",
+                    "thread_id": thread_id,
+                    "mr_iid": mr_iid,
+                    "review": changes.get(
+                        "message",
+                        (
+                            "Unable to retrieve "
+                            "Merge Request changes."
+                        )
+                    )
+                }
+
+            if not changes["changes"]:
+
+                return {
+                    "type": "review",
+                    "thread_id": thread_id,
+                    "mr_iid": mr_iid,
+                    "review": (
+                        "No changes found in this "
+                        "Merge Request."
+                    )
+                }
+
+            diff_text = ""
+
+            for change in changes["changes"]:
+
+                diff_text += (
+                    f"\nFile: "
+                    f"{change.get('new_path', 'Unknown')}\n"
+                    f"{change.get('diff', '')}\n"
+                )
+
+            review = review_code(
+                diff_text
+            )
+
             return {
                 "type": "review",
+                "thread_id": thread_id,
+                "mr_iid": mr_iid,
+                "review": review
+            }
+
+        # --------------------------------------------------------
+        # SUGGESTIONS FOR SELECTED MR
+        # --------------------------------------------------------
+
+        if intent == "suggestion":
+
+            files = get_merge_request_source_files(
+                mr_iid
+            )
+
+            if (
+                isinstance(files, dict)
+                and "error" in files
+            ):
+
+                return {
+                    "type": "suggestion",
+                    "thread_id": thread_id,
+                    "mr_iid": mr_iid,
+                    "suggestions": [],
+                    "message": files.get(
+                        "error",
+                        (
+                            "Unable to retrieve "
+                            "Merge Request files."
+                        )
+                    )
+                }
+
+            if not files:
+
+                return {
+                    "type": "suggestion",
+                    "thread_id": thread_id,
+                    "mr_iid": mr_iid,
+                    "suggestions": []
+                }
+
+            # ----------------------------------------------------
+            # Get MR context from Elasticsearch
+            # ----------------------------------------------------
+
+            mr_details = make_gitlab_request(
+                f"merge_requests/{mr_iid}"
+            )
+
+            if (
+                isinstance(mr_details, dict)
+                and "error" not in mr_details
+            ):
+
+                mr_context = (
+                    get_mr_context_for_suggestions(
+                        mr_iid,
+                        mr_details.get(
+                            "title",
+                            ""
+                        ),
+                        mr_details.get(
+                            "description",
+                            ""
+                        )
+                    )
+                )
+
+            else:
+
+                mr_context = []
+
+            print(
+                "\n🔍 Searching Elasticsearch "
+                "for related Merge Requests..."
+            )
+
+            print(
+                f"✅ Found {len(mr_context)} "
+                "related Merge Requests."
+            )
+
+            # ----------------------------------------------------
+            # Generate AI suggestions
+            # ----------------------------------------------------
+
+            print(
+                "\n🤖 Generating "
+                "context-aware AI code suggestions..."
+            )
+
+            suggestion_text = suggest_code(
+                files,
+                mr_context
+            )
+
+            # ----------------------------------------------------
+            # Parse AI JSON response
+            # ----------------------------------------------------
+
+            try:
+
+                json_start = (
+                    suggestion_text.find("{")
+                )
+
+                json_end = (
+                    suggestion_text.rfind("}") + 1
+                )
+
+                if (
+                    json_start == -1
+                    or json_end == 0
+                ):
+                    raise ValueError(
+                        "No JSON object found"
+                    )
+
+                suggestion_data = json.loads(
+                    suggestion_text[
+                        json_start:json_end
+                    ]
+                )
+
+            except (
+                json.JSONDecodeError,
+                ValueError
+            ):
+
+                return {
+                    "type": "suggestion",
+                    "thread_id": thread_id,
+                    "mr_iid": mr_iid,
+                    "suggestions": [],
+                    "message": (
+                        "AI returned an invalid "
+                        "suggestion format."
+                    ),
+                    "raw_response": suggestion_text
+                }
+
+            return {
+                "type": "suggestion",
+                "thread_id": thread_id,
+                "mr_iid": mr_iid,
+                "suggestions": (
+                    suggestion_data.get(
+                        "suggestions",
+                        []
+                    )
+                )
+            }
+
+    # ============================================================
+    # DIRECT AI CODE REVIEW REQUEST
+    # ============================================================
+
+    # Supports:
+    # "review mr 18"
+    # "review MR !18"
+
+    review_match = re.search(
+        r"(?:review\s+)?(?:mr|merge request)\s*!?(\d+)",
+        lower_message
+    )
+
+    if (
+        "review" in lower_message
+        and review_match
+    ):
+
+        mr_iid = int(
+            review_match.group(1)
+        )
+
+        changes = get_merge_request_changes(
+            mr_iid
+        )
+
+        if "changes" not in changes:
+
+            return {
+                "type": "review",
+                "thread_id": thread_id,
                 "mr_iid": mr_iid,
                 "review": changes.get(
                     "message",
-                    "Unable to retrieve Merge Request changes."
+                    (
+                        "Unable to retrieve "
+                        "Merge Request changes."
+                    )
                 )
             }
 
         if not changes["changes"]:
+
             return {
                 "type": "review",
+                "thread_id": thread_id,
                 "mr_iid": mr_iid,
-                "review": "No changes found in this Merge Request."
+                "review": (
+                    "No changes found in this "
+                    "Merge Request."
+                )
             }
 
         diff_text = ""
@@ -898,185 +1342,148 @@ async def chat(request: ChatRequest):
         for change in changes["changes"]:
 
             diff_text += (
-                f"\nFile: {change.get('new_path', 'Unknown')}\n"
+                f"\nFile: "
+                f"{change.get('new_path', 'Unknown')}\n"
                 f"{change.get('diff', '')}\n"
             )
 
-        review = review_code(diff_text)
+        review = review_code(
+            diff_text
+        )
 
         return {
             "type": "review",
+            "thread_id": thread_id,
             "mr_iid": mr_iid,
             "review": review
         }
 
     # ============================================================
-    # AI CODE SUGGESTION REQUEST
+    # DIRECT AI CODE SUGGESTION REQUEST
     # ============================================================
 
+    # Supports:
+    # "suggest for mr 18"
+    # "give me suggestions for MR !18"
+
+    suggestion_match = re.search(
+        r"(?:mr|merge request)\s*!?(\d+)",
+        lower_message
+    )
+
     if (
-            "suggest" in message.lower()
-            and "mr" in message.lower()
+        "suggest" in lower_message
+        and suggestion_match
     ):
 
-        import re
-
-        match = re.search(
-            r"mr\s*!?(\d+)",
-            message.lower()
+        mr_iid = int(
+            suggestion_match.group(1)
         )
 
-        if not match:
+        # --------------------------------------------------------
+        # Get actual source files
+        # --------------------------------------------------------
+
+        files = get_merge_request_source_files(
+            mr_iid
+        )
+
+        if (
+            isinstance(files, dict)
+            and "error" in files
+        ):
+
             return {
                 "type": "suggestion",
-                "mr_iid": None,
-                "suggestions": [],
-                "message": "Please provide a valid Merge Request ID."
-            }
-
-        mr_iid = int(match.group(1))
-
-        # --------------------------------------------------------
-        # Get actual source files from the MR source branch
-        # --------------------------------------------------------
-
-        files = get_merge_request_source_files(mr_iid)
-
-        # --------------------------------------------------------
-        # Check GitLab response
-        # --------------------------------------------------------
-
-        if isinstance(files, dict) and "error" in files:
-            return {
-                "type": "suggestion",
+                "thread_id": thread_id,
                 "mr_iid": mr_iid,
                 "suggestions": [],
                 "message": files.get(
                     "error",
-                    "Unable to retrieve Merge Request files."
+                    (
+                        "Unable to retrieve "
+                        "Merge Request files."
+                    )
                 )
             }
 
         if not files:
+
             return {
                 "type": "suggestion",
+                "thread_id": thread_id,
                 "mr_iid": mr_iid,
                 "suggestions": []
             }
 
         # --------------------------------------------------------
-        # Send actual source code to AI
+        # Get Elasticsearch context
         # --------------------------------------------------------
 
-        suggestion_text = suggest_code(files, [])
+        mr_details = make_gitlab_request(
+            f"merge_requests/{mr_iid}"
+        )
 
-        # --------------------------------------------------------
-        # Parse AI JSON response
-        # --------------------------------------------------------
+        if (
+            isinstance(mr_details, dict)
+            and "error" not in mr_details
+        ):
 
-        try:
-
-            json_start = suggestion_text.find("{")
-            json_end = suggestion_text.rfind("}") + 1
-
-            if json_start == -1 or json_end == 0:
-                raise ValueError("No JSON object found")
-
-            suggestion_data = json.loads(
-                suggestion_text[json_start:json_end]
+            mr_context = (
+                get_mr_context_for_suggestions(
+                    mr_iid,
+                    mr_details.get(
+                        "title",
+                        ""
+                    ),
+                    mr_details.get(
+                        "description",
+                        ""
+                    )
+                )
             )
 
-        except (json.JSONDecodeError, ValueError):
+        else:
 
-            return {
-                "type": "suggestion",
-                "mr_iid": mr_iid,
-                "suggestion": suggestion_text
-            }
+            mr_context = []
 
-        # --------------------------------------------------------
-        # Return suggestions to frontend
-        # --------------------------------------------------------
+        print(
+            "\n🔍 Searching Elasticsearch "
+            "for related Merge Requests..."
+        )
 
-        return {
-            "type": "suggestion",
-            "mr_iid": mr_iid,
-            "suggestions": suggestion_data.get(
-                "suggestions",
-                []
-            )
-        }
-        # --------------------------------------------------------
-        # Convert GitLab changes into file_contents format
-        # expected by suggest_code()
-        # --------------------------------------------------------
-
-        # Get Merge Request details to find source branch
-
-        mr_details = get_merge_request(mr_iid)
-
-        if "source_branch" not in mr_details:
-            return {
-                "type": "suggestion",
-                "mr_iid": mr_iid,
-                "suggestions": [],
-                "message": "Unable to determine Merge Request source branch."
-            }
-
-        source_branch = mr_details["source_branch"]
-
-        # Fetch ACTUAL source code from the source branch
-
-        file_contents = []
-
-        for change in changes["changes"]:
-
-            file_path = change.get(
-                "new_path",
-                change.get("old_path")
-            )
-
-            if not file_path:
-                continue
-
-            file_data = get_file_content(
-                file_path,
-                source_branch
-            )
-
-            if "error" not in file_data:
-                file_contents.append(file_data)
-
-        # Debugging
-        print("========== FILE CONTENTS ==========")
-        print(file_contents)
-        print("===================================")
-
-        if not file_contents:
-            return {
-                "type": "suggestion",
-                "mr_iid": mr_iid,
-                "suggestions": []
-            }
-
-        # --------------------------------------------------------
-        # Generate AI suggestions
-        # --------------------------------------------------------
-
-        suggestion_text = suggest_code(
-            file_contents
+        print(
+            f"✅ Found {len(mr_context)} "
+            "related Merge Requests."
         )
 
         # --------------------------------------------------------
-        # Parse AI JSON response
+        # Generate suggestions
+        # --------------------------------------------------------
+
+        suggestion_text = suggest_code(
+            files,
+            mr_context
+        )
+
+        # --------------------------------------------------------
+        # Parse AI response
         # --------------------------------------------------------
 
         try:
 
-            json_start = suggestion_text.find("{")
-            json_end = suggestion_text.rfind("}") + 1
+            json_start = (
+                suggestion_text.find("{")
+            )
 
-            if json_start == -1 or json_end == 0:
+            json_end = (
+                suggestion_text.rfind("}") + 1
+            )
+
+            if (
+                json_start == -1
+                or json_end == 0
+            ):
                 raise ValueError(
                     "No JSON object found"
                 )
@@ -1087,32 +1494,38 @@ async def chat(request: ChatRequest):
                 ]
             )
 
-        except (json.JSONDecodeError, ValueError):
+        except (
+            json.JSONDecodeError,
+            ValueError
+        ):
 
             return {
                 "type": "suggestion",
+                "thread_id": thread_id,
                 "mr_iid": mr_iid,
                 "suggestions": [],
                 "message": (
-                    "AI returned an invalid suggestion format."
+                    "AI returned an invalid "
+                    "suggestion format."
                 ),
                 "raw_response": suggestion_text
             }
 
         return {
             "type": "suggestion",
+            "thread_id": thread_id,
             "mr_iid": mr_iid,
-            "suggestions": suggestion_data.get(
-                "suggestions",
-                []
+            "suggestions": (
+                suggestion_data.get(
+                    "suggestions",
+                    []
+                )
             )
         }
 
     # ============================================================
-    # EXISTING LANGGRAPH WORKFLOW
+    # EXISTING LANGGRAPH CREATION WORKFLOW
     # ============================================================
-
-    thread_id = str(uuid.uuid4())
 
     config = {
         "configurable": {
@@ -1127,6 +1540,10 @@ async def chat(request: ChatRequest):
         config=config
     )
 
+    # ============================================================
+    # LANGGRAPH HUMAN APPROVAL
+    # ============================================================
+
     interrupts = result.get(
         "__interrupt__",
         []
@@ -1139,10 +1556,18 @@ async def chat(request: ChatRequest):
         return {
             "status": "waiting_for_approval",
             "thread_id": thread_id,
-            "analysis": approval_request["analysis"],
-            "branch_name": approval_request["branch_name"],
-            "commit_message": approval_request["commit_message"],
-            "mr_title": approval_request["mr_title"]
+            "analysis": approval_request[
+                "analysis"
+            ],
+            "branch_name": approval_request[
+                "branch_name"
+            ],
+            "commit_message": approval_request[
+                "commit_message"
+            ],
+            "mr_title": approval_request[
+                "mr_title"
+            ]
         }
 
     return {
@@ -1150,7 +1575,6 @@ async def chat(request: ChatRequest):
         "thread_id": thread_id,
         "result": result
     }
-
 @app.post("/chat/decision")
 async def chat_decision(request: ChatDecisionRequest):
 

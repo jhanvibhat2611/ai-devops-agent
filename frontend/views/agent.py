@@ -8,6 +8,7 @@ from api import (
     accept_ai_suggestion
 )
 
+
 def agent_view(page):
 
     messages = ft.Column(
@@ -22,6 +23,10 @@ def agent_view(page):
     )
 
     current_thread_id = None
+
+    # ============================================================
+    # ADD MESSAGE
+    # ============================================================
 
     def add_message(text, is_user=False):
 
@@ -46,6 +51,10 @@ def agent_view(page):
             )
         )
 
+    # ============================================================
+    # SEND MESSAGE
+    # ============================================================
+
     def send_message(e):
 
         nonlocal current_thread_id
@@ -55,15 +64,150 @@ def agent_view(page):
         if not message:
             return
 
+        # Show user message
         add_message(
             f"You: {message}",
             is_user=True
         )
 
         input_box.value = ""
+
         page.update()
 
-        response = start_chat(message)
+        # Send message to backend
+        response = start_chat(
+            message,
+            current_thread_id
+        )
+
+        # Save thread ID if backend returns one
+        if response.get("thread_id"):
+            current_thread_id = response["thread_id"]
+
+        # ========================================================
+        # MERGE REQUEST SELECTION
+        # ========================================================
+
+        if response.get("type") == "mr_selection":
+
+            message_text = response.get(
+                "message",
+                "Please select a Merge Request."
+            )
+
+            add_message(
+                f"AI DevOps Agent:\n\n{message_text}"
+            )
+
+            merge_requests = response.get(
+                "merge_requests",
+                []
+            )
+
+            if not merge_requests:
+
+                add_message(
+                    "No Merge Requests were found."
+                )
+
+                page.update()
+                return
+
+            add_message(
+                "Available Merge Requests:"
+            )
+
+            for mr in merge_requests:
+
+                mr_id = mr.get("mr_iid")
+                title = mr.get(
+                    "title",
+                    "Untitled Merge Request"
+                )
+
+                branch = mr.get(
+                    "source_branch",
+                    ""
+                )
+
+                if branch:
+
+                    button_text = (
+                        f"MR !{mr_id} — {title}\n"
+                        f"Branch: {branch}"
+                    )
+
+                else:
+
+                    button_text = (
+                        f"MR !{mr_id} — {title}"
+                    )
+
+                def select_mr(
+                        e,
+                        selected_mr_id=mr_id
+                ):
+
+                    nonlocal current_thread_id
+
+                    selected_message = (
+                        f"suggest MR {selected_mr_id}"
+                    )
+
+                    add_message(
+                        f"You: {selected_message}",
+                        is_user=True
+                    )
+
+                    page.update()
+
+                    suggestion_response = start_chat(
+                        selected_message,
+                        current_thread_id
+                    )
+
+                    if suggestion_response.get(
+                            "thread_id"
+                    ):
+
+                        current_thread_id = (
+                            suggestion_response["thread_id"]
+                        )
+
+                    handle_response(
+                        suggestion_response
+                    )
+
+                messages.controls.append(
+                    ft.Container(
+                        content=ft.ElevatedButton(
+                            button_text,
+                            on_click=select_mr
+                        ),
+                        padding=5
+                    )
+                )
+
+            page.update()
+            return
+
+        # ========================================================
+        # HANDLE NORMAL RESPONSE
+        # ========================================================
+
+        handle_response(response)
+
+    # ============================================================
+    # HANDLE BACKEND RESPONSE
+    # ============================================================
+
+    def handle_response(response):
+
+        nonlocal current_thread_id
+
+        if response.get("thread_id"):
+
+            current_thread_id = response["thread_id"]
 
         # ========================================================
         # AI CODE REVIEW
@@ -71,7 +215,9 @@ def agent_view(page):
 
         if response.get("type") == "review":
 
-            mr_id = response.get("mr_iid")
+            mr_id = response.get(
+                "mr_iid"
+            )
 
             review = response.get(
                 "review",
@@ -92,13 +238,15 @@ def agent_view(page):
                 if result.get("status") == "posted":
 
                     add_message(
-                        "✅ AI review successfully posted to GitLab."
+                        "✅ AI review successfully "
+                        "posted to GitLab."
                     )
 
                 else:
 
                     add_message(
-                        "❌ Failed to post AI review to GitLab.\n\n"
+                        "❌ Failed to post AI review "
+                        "to GitLab.\n\n"
                         f"{result.get('message', result)}"
                     )
 
@@ -114,13 +262,20 @@ def agent_view(page):
             page.update()
             return
 
-        # ============================================================
+        # ========================================================
         # AI CODE SUGGESTION
-        # ============================================================
+        # ========================================================
+
         if response.get("type") == "suggestion":
 
-            mr_id = response.get("mr_iid")
-            suggestions = response.get("suggestions", [])
+            mr_id = response.get(
+                "mr_iid"
+            )
+
+            suggestions = response.get(
+                "suggestions",
+                []
+            )
 
             if not suggestions:
 
@@ -154,9 +309,9 @@ def agent_view(page):
                     previous_code = suggestion.get(
                         "previous_code"
                     ) or (
-                                        "No previous version available - "
-                                        "this is new code."
-                                    )
+                        "No previous version available - "
+                        "this is new code."
+                    )
 
                     reason = suggestion.get(
                         "reason",
@@ -176,12 +331,15 @@ def agent_view(page):
                         f"{reason}"
                     )
 
-                    add_message(suggestion_text)
+                    add_message(
+                        suggestion_text
+                    )
 
                     def accept_suggestion(
                             e,
                             mr_id=mr_id,
                             file_path=file_path,
+                            previous_code=previous_code,
                             current_code=current_code,
                             suggested_code=suggested_code
                     ):
@@ -194,13 +352,16 @@ def agent_view(page):
                             suggested_code
                         )
 
-                        if result.get("status") == "accepted":
+                        if result.get(
+                                "status"
+                        ) == "accepted":
 
                             add_message(
                                 "✅ Suggestion accepted.\n\n"
-                                "The suggested code was applied "
-                                "and committed to the Merge Request "
-                                "source branch.\n\n"
+                                "The suggested code was "
+                                "applied and committed to "
+                                "the Merge Request source "
+                                "branch.\n\n"
                                 f"Commit: "
                                 f"{result.get('commit_url', '')}"
                             )
@@ -208,7 +369,8 @@ def agent_view(page):
                         else:
 
                             add_message(
-                                "❌ Failed to apply suggestion.\n\n"
+                                "❌ Failed to apply "
+                                "suggestion.\n\n"
                                 f"{result.get('message', result)}"
                             )
 
@@ -230,6 +392,7 @@ def agent_view(page):
                                     "Accept Suggestion",
                                     on_click=accept_suggestion
                                 ),
+
                                 ft.OutlinedButton(
                                     "Reject Suggestion",
                                     on_click=reject_suggestion
@@ -241,24 +404,33 @@ def agent_view(page):
             page.update()
             return
 
-
         # ========================================================
-        # EXISTING LANGGRAPH WORKFLOW
+        # LANGGRAPH WORKFLOW
         # ========================================================
 
-        if response.get("status") == "waiting_for_approval":
+        if response.get(
+                "status"
+        ) == "waiting_for_approval":
 
-            current_thread_id = response["thread_id"]
+            current_thread_id = response[
+                "thread_id"
+            ]
 
             proposal = (
                 "AI DevOps Agent:\n\n"
-                f"Analysis:\n{response['analysis']}\n\n"
-                f"Branch: {response['branch_name']}\n"
-                f"Commit: {response['commit_message']}\n"
-                f"MR Title: {response['mr_title']}"
+                f"Analysis:\n"
+                f"{response['analysis']}\n\n"
+                f"Branch: "
+                f"{response['branch_name']}\n"
+                f"Commit: "
+                f"{response['commit_message']}\n"
+                f"MR Title: "
+                f"{response['mr_title']}"
             )
 
-            add_message(proposal)
+            add_message(
+                proposal
+            )
 
             approval_buttons = ft.Row(
                 [
@@ -266,6 +438,7 @@ def agent_view(page):
                         "Approve",
                         on_click=approve
                     ),
+
                     ft.OutlinedButton(
                         "Reject",
                         on_click=reject
@@ -277,28 +450,66 @@ def agent_view(page):
                 approval_buttons
             )
 
+            page.update()
+            return
+
+        # ========================================================
+        # NORMAL LANGGRAPH RESPONSE
+        # ========================================================
+
+        result = response.get(
+            "result",
+            {}
+        )
+
+        if result.get(
+                "request_valid"
+        ) is False:
+
+            validation_message = result.get(
+                "validation_message",
+                "Please provide a valid development task."
+            )
+
+            add_message(
+                f"AI DevOps Agent:\n\n"
+                f"{validation_message}"
+            )
+
         else:
 
-            result = response.get("result", {})
+            # If backend returns a normal message,
+            # show it instead of displaying {}
+            message_text = response.get(
+                "message"
+            )
 
-            if result.get("request_valid") is False:
-
-                validation_message = result.get(
-                    "validation_message",
-                    "Please provide a valid development task."
-                )
+            if message_text:
 
                 add_message(
-                    f"AI DevOps Agent:\n\n{validation_message}"
+                    f"AI DevOps Agent:\n\n"
+                    f"{message_text}"
+                )
+
+            elif result:
+
+                add_message(
+                    f"AI DevOps Agent:\n"
+                    f"{result}"
                 )
 
             else:
 
                 add_message(
-                    f"AI DevOps Agent:\n{result}"
+                    "AI DevOps Agent:\n\n"
+                    "No response received."
                 )
 
         page.update()
+
+    # ============================================================
+    # APPROVE WORKFLOW
+    # ============================================================
 
     def approve(e):
 
@@ -312,29 +523,39 @@ def agent_view(page):
             True
         )
 
-        mr_url = response.get("mr_url")
+        mr_url = response.get(
+            "mr_url"
+        )
 
         if mr_url:
 
             message = (
                 "AI DevOps Agent:\n\n"
                 "✅ Workflow approved.\n\n"
-                f"Merge Request created:\n{mr_url}"
+                f"Merge Request created:\n"
+                f"{mr_url}"
             )
 
         else:
 
             message = (
                 "AI DevOps Agent:\n\n"
-                "⚠️ Workflow was approved, but the Merge Request "
+                "⚠️ Workflow was approved, "
+                "but the Merge Request "
                 "could not be created."
             )
 
-        add_message(message)
+        add_message(
+            message
+        )
 
         current_thread_id = None
 
         page.update()
+
+    # ============================================================
+    # REJECT WORKFLOW
+    # ============================================================
 
     def reject(e):
 
@@ -358,7 +579,15 @@ def agent_view(page):
 
         page.update()
 
+    # ============================================================
+    # ENTER KEY
+    # ============================================================
+
     input_box.on_submit = send_message
+
+    # ============================================================
+    # UI
+    # ============================================================
 
     return ft.Column(
         [

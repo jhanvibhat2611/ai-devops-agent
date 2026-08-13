@@ -97,19 +97,11 @@ def bulk_index_merge_requests(documents):
 
 def get_mr_context_for_suggestions(
     mr_iid: int,
-    mr_title: str = "",
-    mr_description: str = ""
+    title: str,
+    description: str = ""
 ):
 
-    query_parts = []
-
-    if mr_title:
-        query_parts.append(mr_title)
-
-    if mr_description:
-        query_parts.append(mr_description)
-
-    query = " ".join(query_parts).strip()
+    query = f"{title} {description}".strip()
 
     if not query:
         return []
@@ -118,18 +110,22 @@ def get_mr_context_for_suggestions(
 
         results = search_merge_requests(query)
 
-        results = [
-            mr
-            for mr in results
-            if str(mr.get("mr_id")) != str(mr_iid)
-        ]
+        # Do not use the current MR as its own context
+        filtered_results = []
 
-        return results[:3]
+        for mr in results:
+
+            if str(mr.get("mr_id")) == str(mr_iid):
+                continue
+
+            filtered_results.append(mr)
+
+        return filtered_results
 
     except Exception as e:
 
         print(
-            "⚠️ Elasticsearch context search failed:",
+            "❌ Failed to retrieve MR context:",
             e
         )
 

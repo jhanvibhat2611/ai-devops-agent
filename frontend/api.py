@@ -125,11 +125,18 @@ def search_merge_requests(query):
 
     return response.json()
 
-def start_chat(message):
+def start_chat(message, thread_id=None):
+
+    payload = {
+        "message": message
+    }
+
+    if thread_id:
+        payload["thread_id"] = thread_id
 
     response = requests.post(
         f"{BASE_URL}/chat",
-        json={"message": message}
+        json=payload
     )
 
     print("========== CHAT RESPONSE ==========")
@@ -143,9 +150,11 @@ def start_chat(message):
     except ValueError:
         return {
             "status": "error",
-            "message": f"Backend returned invalid response: {response.text}"
+            "message": (
+                f"Backend returned invalid response: "
+                f"{response.text}"
+            )
         }
-
 
 def send_chat_decision(thread_id, approved):
 
