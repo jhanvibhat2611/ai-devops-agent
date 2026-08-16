@@ -2,19 +2,27 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from workflow.state import WorkflowState
+
 from workflow.nodes import (
     validate_request,
     validation_router,
+    retrieve_context,
     analyze_requirement,
-    create_branch,
-    create_merge_request,
+    generate_code,
     human_approval,
     approval_router,
-    retrieve_context
+    create_branch,
+    commit_generated_code,
+    create_merge_request,
 )
 
 
 builder = StateGraph(WorkflowState)
+
+
+# ============================================================
+# NODES
+# ============================================================
 
 builder.add_node(
     "validate_request",
@@ -32,6 +40,11 @@ builder.add_node(
 )
 
 builder.add_node(
+    "generate_code",
+    generate_code
+)
+
+builder.add_node(
     "human_approval",
     human_approval
 )
@@ -42,12 +55,28 @@ builder.add_node(
 )
 
 builder.add_node(
+    "commit_generated_code",
+    commit_generated_code
+)
+
+builder.add_node(
     "create_merge_request",
     create_merge_request
 )
 
 
-builder.set_entry_point("validate_request")
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+builder.set_entry_point(
+    "validate_request"
+)
+
+
+# ============================================================
+# VALIDATION
+# ============================================================
 
 builder.add_conditional_edges(
     "validate_request",
@@ -57,6 +86,12 @@ builder.add_conditional_edges(
         "invalid": END
     }
 )
+
+
+# ============================================================
+# REQUIREMENT ANALYSIS FLOW
+# ============================================================
+
 builder.add_edge(
     "retrieve_context",
     "analyze_requirement"
@@ -64,8 +99,23 @@ builder.add_edge(
 
 builder.add_edge(
     "analyze_requirement",
+    "generate_code"
+)
+
+
+# ============================================================
+# CODE GENERATION → HUMAN APPROVAL
+# ============================================================
+
+builder.add_edge(
+    "generate_code",
     "human_approval"
 )
+
+
+# ============================================================
+# HUMAN APPROVAL ROUTER
+# ============================================================
 
 builder.add_conditional_edges(
     "human_approval",
@@ -76,8 +126,18 @@ builder.add_conditional_edges(
     }
 )
 
+
+# ============================================================
+# GITLAB FLOW
+# ============================================================
+
 builder.add_edge(
     "create_branch",
+    "commit_generated_code"
+)
+
+builder.add_edge(
+    "commit_generated_code",
     "create_merge_request"
 )
 
@@ -86,6 +146,10 @@ builder.add_edge(
     END
 )
 
+
+# ============================================================
+# CHECKPOINTING
+# ============================================================
 
 checkpointer = MemorySaver()
 

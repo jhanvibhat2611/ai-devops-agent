@@ -55,15 +55,8 @@ def suggest_code(file_contents: list, mr_context: list):
 
     for file in file_contents:
 
-        file_name = file.get(
-            "file",
-            "Unknown"
-        )
-
-        source_code = file.get(
-            "content",
-            ""
-        )
+        file_name = file.get("file", "Unknown")
+        source_code = file.get("content", "")
 
         if not source_code.strip():
             continue
@@ -73,17 +66,12 @@ def suggest_code(file_contents: list, mr_context: list):
         # ============================================================
 
         try:
-
-            tree = ast.parse(
-                source_code
-            )
+            tree = ast.parse(source_code)
 
         except SyntaxError:
-
             print(
                 f"⚠️ Could not parse {file_name} as Python."
             )
-
             continue
 
         functions = []
@@ -122,8 +110,7 @@ def suggest_code(file_contents: list, mr_context: list):
         for function in functions:
 
             functions_text += (
-                f"\n===== FUNCTION: "
-                f"{function['name']} =====\n"
+                f"\n===== FUNCTION: {function['name']} =====\n"
                 f"{function['code']}\n"
                 f"===== END FUNCTION =====\n"
             )
@@ -179,7 +166,8 @@ Consider:
 - genuinely useful type hints
 - security issues when relevant
 
-Do NOT suggest changes merely because you prefer another style.
+Do NOT suggest changes merely because you prefer another
+coding style.
 
 Do NOT make changes merely for:
 
@@ -200,8 +188,8 @@ The existing code may already be correct.
 Do NOT claim that code is incorrect simply because another
 implementation is possible.
 
-If two implementations are functionally equivalent, do NOT
-describe one as a bug.
+If two implementations are functionally equivalent,
+do NOT describe one as a bug.
 
 For example:
 
@@ -213,8 +201,8 @@ price * (1 - discount)
 
 are mathematically equivalent for the same inputs.
 
-Do NOT suggest changing between them unless there is another
-clear practical benefit.
+Do NOT suggest changing between them unless there is
+another clear practical benefit.
 
 Do NOT invent requirements.
 
@@ -263,24 +251,15 @@ suggested_code MUST contain the COMPLETE improved function.
 
 It must include the complete function definition and body.
 
-For example:
+The suggested function must:
 
-def find_user(user):
-    if user.get("name") == "admin":
-        return True
-    else:
-        return False
+- preserve the original function's purpose
+- preserve existing behavior unless the improvement
+  genuinely requires a behavior change
+- remain valid Python
+- contain only the selected function
 
-can become:
-
-def find_user(user):
-    return user.get("name") == "admin"
-
-Do NOT return only:
-
-return user.get("name") == "admin"
-
-The suggested_code MUST be a complete function.
+Do NOT return only part of the function.
 
 Do NOT include:
 
@@ -290,7 +269,7 @@ Do NOT include:
 - @@
 - Markdown
 - Markdown code fences
-- explanations outside the function
+- explanations inside suggested_code
 
 ============================================================
 REASON
@@ -312,7 +291,7 @@ CURRENT CODE
 
 DO NOT return current_code.
 
-The backend will determine current_code itself.
+The backend will determine the exact current code.
 
 Only return:
 
@@ -330,7 +309,7 @@ Do NOT return Markdown.
 
 Do NOT return ```json.
 
-Do NOT return any text before or after the JSON.
+Do NOT return anything before or after the JSON.
 
 Return exactly:
 
@@ -370,64 +349,43 @@ Before returning the JSON, verify:
 """
 
         # ============================================================
-        # SEND TO QWEN
+        # CALL QWEN
         # ============================================================
 
         print(
             "\n========== SOURCE FUNCTIONS SENT TO MODEL =========="
         )
+        print(functions_text)
+        print("=====================================================")
 
-        print(
-            functions_text
-        )
+        response = llm2.invoke(prompt)
 
-        print(
-            "====================================================="
-        )
-
-        response = llm2.invoke(
-            prompt
-        )
-
-        response_text = (
-            response.content.strip()
-        )
+        response_text = response.content.strip()
 
         print(
             "\n========== MODEL RESPONSE =========="
         )
-
-        print(
-            response_text
-        )
-
-        print(
-            "===================================="
-        )
+        print(response_text)
+        print("====================================")
 
         # ============================================================
-        # CLEAN RESPONSE
+        # CLEAN MARKDOWN FENCES
         # ============================================================
 
         if response_text.startswith("```"):
 
-            response_text = (
-                response_text
-                .replace(
-                    "```json",
-                    "",
-                    1
-                )
-                .replace(
-                    "```",
-                    "",
-                    1
-                )
-                .strip()
-            )
+            lines = response_text.splitlines()
+
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+
+            response_text = "\n".join(lines).strip()
 
         # ============================================================
-        # EXTRACT JSON
+        # FIND JSON OBJECT
         # ============================================================
 
         json_start = response_text.find("{")
@@ -439,8 +397,7 @@ Before returning the JSON, verify:
         ):
 
             print(
-                f"⚠️ No JSON object returned "
-                f"for {file_name}"
+                f"⚠️ No JSON object returned for {file_name}"
             )
 
             continue
@@ -452,11 +409,8 @@ Before returning the JSON, verify:
         # ============================================================
         # PARSE JSON
         #
-        # strict=False is intentional.
-        #
-        # Qwen sometimes returns literal newlines inside
-        # suggested_code strings. Standard JSON rejects those
-        # newlines, while strict=False allows them.
+        # strict=False handles Qwen occasionally returning
+        # literal newlines inside suggested_code strings.
         # ============================================================
 
         try:
@@ -469,22 +423,17 @@ Before returning the JSON, verify:
         except json.JSONDecodeError as e:
 
             print(
-                f"⚠️ Invalid JSON returned "
-                f"for {file_name}: {e}"
+                f"⚠️ Invalid JSON returned for "
+                f"{file_name}: {e}"
             )
 
-            print(
-                "Raw model response:"
-            )
-
-            print(
-                response_text
-            )
+            print("Raw model response:")
+            print(response_text)
 
             continue
 
         # ============================================================
-        # GET SUGGESTIONS
+        # VALIDATE SUGGESTIONS
         # ============================================================
 
         ai_suggestions = parsed.get(
@@ -535,8 +484,8 @@ Before returning the JSON, verify:
         if not function_name:
 
             print(
-                f"⚠️ AI did not provide "
-                f"a function name for {file_name}"
+                f"⚠️ AI did not provide a "
+                f"function name for {file_name}"
             )
 
             continue
@@ -544,8 +493,8 @@ Before returning the JSON, verify:
         if not suggested_code:
 
             print(
-                f"⚠️ AI did not provide "
-                f"suggested code for {file_name}"
+                f"⚠️ AI did not provide suggested "
+                f"code for {file_name}"
             )
 
             continue
@@ -554,27 +503,23 @@ Before returning the JSON, verify:
         # CLEAN SUGGESTED CODE
         # ============================================================
 
-        suggested_code = (
+        suggested_code = str(
             suggested_code
-            .strip()
-        )
+        ).strip()
 
         if suggested_code.startswith("```"):
 
-            suggested_code = (
-                suggested_code
-                .replace(
-                    "```python",
-                    "",
-                    1
-                )
-                .replace(
-                    "```",
-                    "",
-                    1
-                )
-                .strip()
-            )
+            lines = suggested_code.splitlines()
+
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+
+            suggested_code = "\n".join(
+                lines
+            ).strip()
 
         # ============================================================
         # FIND EXACT ORIGINAL FUNCTION
@@ -584,10 +529,7 @@ Before returning the JSON, verify:
 
         for function in functions:
 
-            if (
-                function["name"]
-                == function_name
-            ):
+            if function["name"] == function_name:
 
                 matching_function = function
                 break
@@ -595,8 +537,8 @@ Before returning the JSON, verify:
         if not matching_function:
 
             print(
-                f"⚠️ AI selected unknown "
-                f"function: {function_name}"
+                f"⚠️ AI selected unknown function: "
+                f"{function_name}"
             )
 
             continue
@@ -618,15 +560,14 @@ Before returning the JSON, verify:
         except SyntaxError as e:
 
             print(
-                f"⚠️ AI returned invalid "
-                f"Python for {function_name}: {e}"
+                f"⚠️ AI returned invalid Python "
+                f"for {function_name}: {e}"
             )
 
             continue
 
         # ============================================================
-        # MAKE SURE SUGGESTED CODE CONTAINS
-        # THE CORRECT COMPLETE FUNCTION
+        # FIND FUNCTION INSIDE SUGGESTED CODE
         # ============================================================
 
         suggested_functions = []
@@ -643,18 +584,13 @@ Before returning the JSON, verify:
                 )
             ):
 
-                suggested_functions.append(
-                    node
-                )
+                suggested_functions.append(node)
 
         matching_suggested_function = None
 
         for node in suggested_functions:
 
-            if (
-                node.name
-                == function_name
-            ):
+            if node.name == function_name:
 
                 matching_suggested_function = node
                 break
@@ -662,17 +598,15 @@ Before returning the JSON, verify:
         if not matching_suggested_function:
 
             print(
-                f"⚠️ Suggested code does not "
-                f"contain the complete function "
+                f"⚠️ Suggested code does not contain "
+                f"the complete function "
                 f"{function_name}"
             )
 
             continue
 
         # ============================================================
-        # REMOVE ACCIDENTAL EXTRA CODE
-        #
-        # We only want the selected function.
+        # EXTRACT ONLY THE SELECTED FUNCTION
         # ============================================================
 
         suggested_function_code = (
@@ -696,23 +630,18 @@ Before returning the JSON, verify:
         )
 
         # ============================================================
-        # REJECT UNCHANGED SUGGESTIONS
+        # REJECT UNCHANGED CODE
         # ============================================================
 
         normalized_current = (
-            exact_current_code
-            .strip()
+            exact_current_code.strip()
         )
 
         normalized_suggested = (
-            suggested_function_code
-            .strip()
+            suggested_function_code.strip()
         )
 
-        if (
-            normalized_current
-            == normalized_suggested
-        ):
+        if normalized_current == normalized_suggested:
 
             print(
                 f"ℹ️ AI returned unchanged code "
@@ -732,31 +661,40 @@ Before returning the JSON, verify:
 
             "function_name": function_name,
 
-            "previous_code": (
-                "No previous version available - "
-                "this is new code."
-            ),
+            "current_code": exact_current_code,
 
-            "current_code": (
-                exact_current_code
-            ),
+            "suggested_code": suggested_function_code,
 
-            "suggested_code": (
-                suggested_function_code
-            ),
-
-            "reason": (
-                str(reason).strip()
-            )
+            "reason": str(reason).strip()
         })
+
+        print(
+            f"✅ Valid suggestion generated for "
+            f"{file_name} -> {function_name}"
+        )
 
     # ============================================================
     # FINAL RESPONSE
     # ============================================================
 
+    result = {
+        "suggestions": suggestions
+    }
+
+    print(
+        "\n========== FINAL AI SUGGESTIONS =========="
+    )
+    print(
+        json.dumps(
+            result,
+            indent=4
+        )
+    )
+    print(
+        "=========================================="
+    )
+
     return json.dumps(
-        {
-            "suggestions": suggestions
-        },
+        result,
         indent=4
     )

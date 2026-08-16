@@ -418,11 +418,13 @@ def agent_view(page):
                 f"Analysis:\n"
                 f"{response['analysis']}\n\n"
                 f"Branch: "
-                f"{response['branch_name']}\n"
+                f"{response['branch_name']}\n\n"
                 f"Commit: "
-                f"{response['commit_message']}\n"
+                f"{response['commit_message']}\n\n"
                 f"MR Title: "
-                f"{response['mr_title']}"
+                f"{response['mr_title']}\n\n"
+                f"Generated Code:\n"
+                f"{response.get('generated_code', 'No generated code available.')}"
             )
 
             add_message(

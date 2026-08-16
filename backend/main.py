@@ -1550,24 +1550,19 @@ async def chat(request: ChatRequest):
     )
 
     if interrupts:
-
         approval_request = interrupts[0].value
 
         return {
             "status": "waiting_for_approval",
             "thread_id": thread_id,
-            "analysis": approval_request[
-                "analysis"
-            ],
-            "branch_name": approval_request[
-                "branch_name"
-            ],
-            "commit_message": approval_request[
-                "commit_message"
-            ],
-            "mr_title": approval_request[
-                "mr_title"
-            ]
+            "analysis": approval_request["analysis"],
+            "branch_name": approval_request["branch_name"],
+            "commit_message": approval_request["commit_message"],
+            "mr_title": approval_request["mr_title"],
+            "generated_code": approval_request.get(
+                "generated_code",
+                ""
+            )
         }
 
     return {
