@@ -22,13 +22,39 @@ def agent_view(page):
         expand=True
     )
 
+    # ============================================================
+    # FRONTEND STATE
+    # ============================================================
+
     current_thread_id = None
+    current_intent = None
+
+    # ============================================================
+    # RESET AGENT STATE
+    # ============================================================
+
+    def reset_agent_state():
+
+        nonlocal current_thread_id
+        nonlocal current_intent
+
+        current_thread_id = None
+        current_intent = None
+
+        messages.controls.clear()
+
+        input_box.value = ""
+
+        page.update()
 
     # ============================================================
     # ADD MESSAGE
     # ============================================================
 
-    def add_message(text, is_user=False):
+    def add_message(
+            text,
+            is_user=False
+    ):
 
         messages.controls.append(
             ft.Container(
@@ -58,13 +84,17 @@ def agent_view(page):
     def send_message(e):
 
         nonlocal current_thread_id
+        nonlocal current_intent
 
         message = input_box.value.strip()
 
         if not message:
             return
 
+        # --------------------------------------------------------
         # Show user message
+        # --------------------------------------------------------
+
         add_message(
             f"You: {message}",
             is_user=True
@@ -74,21 +104,42 @@ def agent_view(page):
 
         page.update()
 
-        # Send message to backend
+        # --------------------------------------------------------
+        # Send request to backend
+        # --------------------------------------------------------
+
         response = start_chat(
             message,
             current_thread_id
         )
 
-        # Save thread ID if backend returns one
+        # --------------------------------------------------------
+        # Save intent returned by backend
+        # --------------------------------------------------------
+
+        if response.get("intent"):
+
+            current_intent = response[
+                "intent"
+            ]
+
+        # --------------------------------------------------------
+        # Save thread ID
+        # --------------------------------------------------------
+
         if response.get("thread_id"):
-            current_thread_id = response["thread_id"]
+
+            current_thread_id = response[
+                "thread_id"
+            ]
 
         # ========================================================
         # MERGE REQUEST SELECTION
         # ========================================================
 
-        if response.get("type") == "mr_selection":
+        if response.get(
+                "type"
+        ) == "mr_selection":
 
             message_text = response.get(
                 "message",
@@ -96,7 +147,8 @@ def agent_view(page):
             )
 
             add_message(
-                f"AI DevOps Agent:\n\n{message_text}"
+                f"AI DevOps Agent:\n\n"
+                f"{message_text}"
             )
 
             merge_requests = response.get(
@@ -117,9 +169,16 @@ def agent_view(page):
                 "Available Merge Requests:"
             )
 
+            # ----------------------------------------------------
+            # Create MR selection buttons
+            # ----------------------------------------------------
+
             for mr in merge_requests:
 
-                mr_id = mr.get("mr_iid")
+                mr_id = mr.get(
+                    "mr_iid"
+                )
+
                 title = mr.get(
                     "title",
                     "Untitled Merge Request"
@@ -143,16 +202,44 @@ def agent_view(page):
                         f"MR !{mr_id} — {title}"
                     )
 
+                # ------------------------------------------------
+                # Capture current MR ID safely
+                # ------------------------------------------------
+
                 def select_mr(
                         e,
                         selected_mr_id=mr_id
                 ):
 
                     nonlocal current_thread_id
+                    nonlocal current_intent
 
-                    selected_message = (
-                        f"suggest MR {selected_mr_id}"
-                    )
+                    # --------------------------------------------
+                    # IMPORTANT:
+                    # Preserve the user's original intent.
+                    # --------------------------------------------
+
+                    if current_intent == "review":
+
+                        selected_message = (
+                            f"review MR "
+                            f"{selected_mr_id}"
+                        )
+
+                    elif current_intent == "suggestion":
+
+                        selected_message = (
+                            f"suggest MR "
+                            f"{selected_mr_id}"
+                        )
+
+                    else:
+
+                        # Safe fallback
+                        selected_message = (
+                            f"suggest MR "
+                            f"{selected_mr_id}"
+                        )
 
                     add_message(
                         f"You: {selected_message}",
@@ -161,21 +248,41 @@ def agent_view(page):
 
                     page.update()
 
-                    suggestion_response = start_chat(
+                    selected_response = start_chat(
                         selected_message,
                         current_thread_id
                     )
 
-                    if suggestion_response.get(
+                    # --------------------------------------------
+                    # Update thread ID
+                    # --------------------------------------------
+
+                    if selected_response.get(
                             "thread_id"
                     ):
 
                         current_thread_id = (
-                            suggestion_response["thread_id"]
+                            selected_response[
+                                "thread_id"
+                            ]
+                        )
+
+                    # --------------------------------------------
+                    # Keep intent if backend returns it
+                    # --------------------------------------------
+
+                    if selected_response.get(
+                            "intent"
+                    ):
+
+                        current_intent = (
+                            selected_response[
+                                "intent"
+                            ]
                         )
 
                     handle_response(
-                        suggestion_response
+                        selected_response
                     )
 
                 messages.controls.append(
@@ -195,7 +302,9 @@ def agent_view(page):
         # HANDLE NORMAL RESPONSE
         # ========================================================
 
-        handle_response(response)
+        handle_response(
+            response
+        )
 
     # ============================================================
     # HANDLE BACKEND RESPONSE
@@ -204,16 +313,43 @@ def agent_view(page):
     def handle_response(response):
 
         nonlocal current_thread_id
+        nonlocal current_intent
 
-        if response.get("thread_id"):
+        # --------------------------------------------------------
+        # Thread ID
+        # --------------------------------------------------------
 
-            current_thread_id = response["thread_id"]
+        if response.get(
+                "thread_id"
+        ):
+
+            current_thread_id = (
+                response[
+                    "thread_id"
+                ]
+            )
+
+        # --------------------------------------------------------
+        # Intent
+        # --------------------------------------------------------
+
+        if response.get(
+                "intent"
+        ):
+
+            current_intent = (
+                response[
+                    "intent"
+                ]
+            )
 
         # ========================================================
         # AI CODE REVIEW
         # ========================================================
 
-        if response.get("type") == "review":
+        if response.get(
+                "type"
+        ) == "review":
 
             mr_id = response.get(
                 "mr_iid"
@@ -225,14 +361,19 @@ def agent_view(page):
             )
 
             add_message(
-                f"AI Code Review:\n\n{review}"
+                f"AI Code Review:\n\n"
+                f"{review}"
             )
 
             def post_review(e):
 
-                result = post_ai_review(mr_id)
+                result = post_ai_review(
+                    mr_id
+                )
 
-                if result.get("status") == "posted":
+                if result.get(
+                        "status"
+                ) == "posted":
 
                     add_message(
                         "✅ AI review successfully "
@@ -263,7 +404,9 @@ def agent_view(page):
         # AI CODE SUGGESTION
         # ========================================================
 
-        if response.get("type") == "suggestion":
+        if response.get(
+                "type"
+        ) == "suggestion":
 
             mr_id = response.get(
                 "mr_iid"
@@ -293,6 +436,11 @@ def agent_view(page):
                         "Unknown"
                     )
 
+                    function_name = suggestion.get(
+                        "function_name",
+                        "Unknown"
+                    )
+
                     current_code = suggestion.get(
                         "current_code",
                         ""
@@ -303,13 +451,6 @@ def agent_view(page):
                         ""
                     )
 
-                    previous_code = suggestion.get(
-                        "previous_code"
-                    ) or (
-                        "No previous version available - "
-                        "this is new code."
-                    )
-
                     reason = suggestion.get(
                         "reason",
                         ""
@@ -318,8 +459,7 @@ def agent_view(page):
                     suggestion_text = (
                         f"AI Code Suggestion {i}\n\n"
                         f"File: {file_path}\n\n"
-                        f"Previous Code:\n"
-                        f"{previous_code}\n\n"
+                        f"Function: {function_name}\n\n"
                         f"Current Code:\n"
                         f"{current_code}\n\n"
                         f"Suggested Code:\n"
@@ -332,11 +472,14 @@ def agent_view(page):
                         suggestion_text
                     )
 
+                    # --------------------------------------------
+                    # Accept suggestion
+                    # --------------------------------------------
+
                     def accept_suggestion(
                             e,
                             mr_id=mr_id,
                             file_path=file_path,
-                            previous_code=previous_code,
                             current_code=current_code,
                             suggested_code=suggested_code
                     ):
@@ -344,7 +487,6 @@ def agent_view(page):
                         result = accept_ai_suggestion(
                             mr_id,
                             file_path,
-                            previous_code,
                             current_code,
                             suggested_code
                         )
@@ -372,6 +514,10 @@ def agent_view(page):
                             )
 
                         page.update()
+
+                    # --------------------------------------------
+                    # Reject suggestion
+                    # --------------------------------------------
 
                     def reject_suggestion(e):
 
@@ -409,9 +555,11 @@ def agent_view(page):
                 "status"
         ) == "waiting_for_approval":
 
-            current_thread_id = response[
-                "thread_id"
-            ]
+            current_thread_id = (
+                response[
+                    "thread_id"
+                ]
+            )
 
             proposal = (
                 "AI DevOps Agent:\n\n"
@@ -424,7 +572,10 @@ def agent_view(page):
                 f"MR Title: "
                 f"{response['mr_title']}\n\n"
                 f"Generated Code:\n"
-                f"{response.get('generated_code', 'No generated code available.')}"
+                f"{response.get(
+                    'generated_code',
+                    'No generated code available.'
+                )}"
             )
 
             add_message(
@@ -471,14 +622,12 @@ def agent_view(page):
             )
 
             add_message(
-                f"AI DevOps Agent:\n\n"
+                "AI DevOps Agent:\n\n"
                 f"{validation_message}"
             )
 
         else:
 
-            # If backend returns a normal message,
-            # show it instead of displaying {}
             message_text = response.get(
                 "message"
             )
@@ -486,7 +635,7 @@ def agent_view(page):
             if message_text:
 
                 add_message(
-                    f"AI DevOps Agent:\n\n"
+                    "AI DevOps Agent:\n\n"
                     f"{message_text}"
                 )
 
@@ -513,6 +662,7 @@ def agent_view(page):
     def approve(e):
 
         nonlocal current_thread_id
+        nonlocal current_intent
 
         if not current_thread_id:
             return
@@ -548,7 +698,9 @@ def agent_view(page):
             message
         )
 
+        # Clear workflow state after completion
         current_thread_id = None
+        current_intent = None
 
         page.update()
 
@@ -559,6 +711,7 @@ def agent_view(page):
     def reject(e):
 
         nonlocal current_thread_id
+        nonlocal current_intent
 
         if not current_thread_id:
             return
@@ -574,7 +727,9 @@ def agent_view(page):
             "No branch or Merge Request was created."
         )
 
+        # Clear workflow state after rejection
         current_thread_id = None
+        current_intent = None
 
         page.update()
 
@@ -607,6 +762,12 @@ def agent_view(page):
                     ft.ElevatedButton(
                         "Send",
                         on_click=send_message
+                    ),
+
+                    ft.OutlinedButton(
+                        "New Chat",
+                        on_click=lambda e:
+                        reset_agent_state()
                     )
                 ]
             )

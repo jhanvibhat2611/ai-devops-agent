@@ -62,7 +62,7 @@ class ChatDecisionRequest(BaseModel):
 
 class SuggestionRequest(BaseModel):
     file: str
-    previous_code: str
+    # previous_code: str
     current_code: str
     suggested_code: str
 
