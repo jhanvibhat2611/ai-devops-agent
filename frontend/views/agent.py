@@ -42,7 +42,6 @@ def agent_view(page):
         current_intent = None
 
         messages.controls.clear()
-
         input_box.value = ""
 
         page.update()
@@ -52,8 +51,8 @@ def agent_view(page):
     # ============================================================
 
     def add_message(
-            text,
-            is_user=False
+        text,
+        is_user=False
     ):
 
         messages.controls.append(
@@ -114,14 +113,12 @@ def agent_view(page):
         )
 
         # --------------------------------------------------------
-        # Save intent returned by backend
+        # Save intent
         # --------------------------------------------------------
 
         if response.get("intent"):
 
-            current_intent = response[
-                "intent"
-            ]
+            current_intent = response["intent"]
 
         # --------------------------------------------------------
         # Save thread ID
@@ -129,17 +126,13 @@ def agent_view(page):
 
         if response.get("thread_id"):
 
-            current_thread_id = response[
-                "thread_id"
-            ]
+            current_thread_id = response["thread_id"]
 
         # ========================================================
         # MERGE REQUEST SELECTION
         # ========================================================
 
-        if response.get(
-                "type"
-        ) == "mr_selection":
+        if response.get("type") == "mr_selection":
 
             message_text = response.get(
                 "message",
@@ -175,9 +168,7 @@ def agent_view(page):
 
             for mr in merge_requests:
 
-                mr_id = mr.get(
-                    "mr_iid"
-                )
+                mr_id = mr.get("mr_iid")
 
                 title = mr.get(
                     "title",
@@ -203,21 +194,16 @@ def agent_view(page):
                     )
 
                 # ------------------------------------------------
-                # Capture current MR ID safely
+                # Capture MR ID safely
                 # ------------------------------------------------
 
                 def select_mr(
-                        e,
-                        selected_mr_id=mr_id
+                    e,
+                    selected_mr_id=mr_id
                 ):
 
                     nonlocal current_thread_id
                     nonlocal current_intent
-
-                    # --------------------------------------------
-                    # IMPORTANT:
-                    # Preserve the user's original intent.
-                    # --------------------------------------------
 
                     if current_intent == "review":
 
@@ -235,7 +221,6 @@ def agent_view(page):
 
                     else:
 
-                        # Safe fallback
                         selected_message = (
                             f"suggest MR "
                             f"{selected_mr_id}"
@@ -253,12 +238,8 @@ def agent_view(page):
                         current_thread_id
                     )
 
-                    # --------------------------------------------
-                    # Update thread ID
-                    # --------------------------------------------
-
                     if selected_response.get(
-                            "thread_id"
+                        "thread_id"
                     ):
 
                         current_thread_id = (
@@ -267,12 +248,8 @@ def agent_view(page):
                             ]
                         )
 
-                    # --------------------------------------------
-                    # Keep intent if backend returns it
-                    # --------------------------------------------
-
                     if selected_response.get(
-                            "intent"
+                        "intent"
                     ):
 
                         current_intent = (
@@ -299,12 +276,10 @@ def agent_view(page):
             return
 
         # ========================================================
-        # HANDLE NORMAL RESPONSE
+        # HANDLE RESPONSE
         # ========================================================
 
-        handle_response(
-            response
-        )
+        handle_response(response)
 
     # ============================================================
     # HANDLE BACKEND RESPONSE
@@ -319,37 +294,27 @@ def agent_view(page):
         # Thread ID
         # --------------------------------------------------------
 
-        if response.get(
-                "thread_id"
-        ):
+        if response.get("thread_id"):
 
             current_thread_id = (
-                response[
-                    "thread_id"
-                ]
+                response["thread_id"]
             )
 
         # --------------------------------------------------------
         # Intent
         # --------------------------------------------------------
 
-        if response.get(
-                "intent"
-        ):
+        if response.get("intent"):
 
             current_intent = (
-                response[
-                    "intent"
-                ]
+                response["intent"]
             )
 
         # ========================================================
         # AI CODE REVIEW
         # ========================================================
 
-        if response.get(
-                "type"
-        ) == "review":
+        if response.get("type") == "review":
 
             mr_id = response.get(
                 "mr_iid"
@@ -372,7 +337,7 @@ def agent_view(page):
                 )
 
                 if result.get(
-                        "status"
+                    "status"
                 ) == "posted":
 
                     add_message(
@@ -404,9 +369,7 @@ def agent_view(page):
         # AI CODE SUGGESTION
         # ========================================================
 
-        if response.get(
-                "type"
-        ) == "suggestion":
+        if response.get("type") == "suggestion":
 
             mr_id = response.get(
                 "mr_iid"
@@ -427,8 +390,8 @@ def agent_view(page):
             else:
 
                 for i, suggestion in enumerate(
-                        suggestions,
-                        start=1
+                    suggestions,
+                    start=1
                 ):
 
                     file_path = suggestion.get(
@@ -472,16 +435,16 @@ def agent_view(page):
                         suggestion_text
                     )
 
-                    # --------------------------------------------
+                    # ------------------------------------------------
                     # Accept suggestion
-                    # --------------------------------------------
+                    # ------------------------------------------------
 
                     def accept_suggestion(
-                            e,
-                            mr_id=mr_id,
-                            file_path=file_path,
-                            current_code=current_code,
-                            suggested_code=suggested_code
+                        e,
+                        mr_id=mr_id,
+                        file_path=file_path,
+                        current_code=current_code,
+                        suggested_code=suggested_code
                     ):
 
                         result = accept_ai_suggestion(
@@ -492,7 +455,7 @@ def agent_view(page):
                         )
 
                         if result.get(
-                                "status"
+                            "status"
                         ) == "accepted":
 
                             add_message(
@@ -515,9 +478,9 @@ def agent_view(page):
 
                         page.update()
 
-                    # --------------------------------------------
+                    # ------------------------------------------------
                     # Reject suggestion
-                    # --------------------------------------------
+                    # ------------------------------------------------
 
                     def reject_suggestion(e):
 
@@ -548,17 +511,15 @@ def agent_view(page):
             return
 
         # ========================================================
-        # LANGGRAPH WORKFLOW
+        # LANGGRAPH HUMAN APPROVAL
         # ========================================================
 
         if response.get(
-                "status"
+            "status"
         ) == "waiting_for_approval":
 
             current_thread_id = (
-                response[
-                    "thread_id"
-                ]
+                response["thread_id"]
             )
 
             proposal = (
@@ -604,7 +565,7 @@ def agent_view(page):
             return
 
         # ========================================================
-        # NORMAL LANGGRAPH RESPONSE
+        # LANGGRAPH COMPLETED / NORMAL RESPONSE
         # ========================================================
 
         result = response.get(
@@ -612,8 +573,22 @@ def agent_view(page):
             {}
         )
 
+        if not isinstance(result, dict):
+
+            add_message(
+                "AI DevOps Agent:\n\n"
+                "The backend returned an unexpected response."
+            )
+
+            page.update()
+            return
+
+        # ========================================================
+        # VALIDATION FAILED
+        # ========================================================
+
         if result.get(
-                "request_valid"
+            "request_valid"
         ) is False:
 
             validation_message = result.get(
@@ -623,35 +598,264 @@ def agent_view(page):
 
             add_message(
                 "AI DevOps Agent:\n\n"
-                f"{validation_message}"
+                f"❌ {validation_message}"
             )
 
-        else:
+            page.update()
+            return
 
-            message_text = response.get(
-                "message"
+        # ========================================================
+        # SECURITY FAILURE
+        # ========================================================
+
+        security_passed = result.get(
+            "security_passed"
+        )
+
+        if security_passed is False:
+
+            security_report = result.get(
+                "security_report",
+                ""
             )
 
-            if message_text:
+            security_summary = ""
 
-                add_message(
-                    "AI DevOps Agent:\n\n"
-                    f"{message_text}"
+            if isinstance(
+                security_report,
+                dict
+            ):
+
+                security_summary = (
+                    security_report.get(
+                        "summary",
+                        ""
+                    )
                 )
 
-            elif result:
-
-                add_message(
-                    f"AI DevOps Agent:\n"
-                    f"{result}"
+                findings = security_report.get(
+                    "findings",
+                    []
                 )
+
+                if findings:
+
+                    findings_text = "\n".join(
+                        f"• {finding}"
+                        for finding in findings
+                    )
+
+                else:
+
+                    findings_text = (
+                        "No detailed findings provided."
+                    )
 
             else:
 
-                add_message(
-                    "AI DevOps Agent:\n\n"
-                    "No response received."
+                findings_text = str(
+                    security_report
                 )
+
+            security_message = (
+                "AI DevOps Agent:\n\n"
+                "🔐 Security Review\n\n"
+                "❌ Security check failed.\n\n"
+            )
+
+            if security_summary:
+
+                security_message += (
+                    f"Summary:\n"
+                    f"{security_summary}\n\n"
+                )
+
+            security_message += (
+                f"Security Findings:\n"
+                f"{findings_text}\n\n"
+                "🚫 Workflow stopped.\n"
+                "No branch, commit, or Merge Request "
+                "was created."
+            )
+
+            add_message(
+                security_message
+            )
+
+            page.update()
+            return
+
+        # ========================================================
+        # UNIT TEST FAILURE
+        # ========================================================
+
+        test_passed = result.get(
+            "test_passed"
+        )
+
+        if test_passed is False:
+
+            test_result = result.get(
+                "test_result",
+                "No test result available."
+            )
+
+            add_message(
+                "AI DevOps Agent:\n\n"
+                "🧪 Unit Tests\n\n"
+                "❌ Generated tests failed.\n\n"
+                f"{test_result}\n\n"
+                "🚫 Workflow stopped.\n"
+                "The code was not committed."
+            )
+
+            page.update()
+            return
+
+        # ========================================================
+        # COMPLETED WORKFLOW
+        # ========================================================
+
+        message_text = response.get(
+            "message"
+        )
+
+        if message_text:
+
+            add_message(
+                "AI DevOps Agent:\n\n"
+                f"{message_text}"
+            )
+
+            page.update()
+            return
+
+        # --------------------------------------------------------
+        # Build a clean workflow summary
+        # --------------------------------------------------------
+
+        summary_parts = [
+            "AI DevOps Agent:"
+        ]
+
+        analysis = result.get(
+            "analysis"
+        )
+
+        if analysis:
+
+            summary_parts.extend(
+                [
+                    "",
+                    "🧠 Analysis:",
+                    str(analysis)
+                ]
+            )
+
+        generated_code = result.get(
+            "generated_code"
+        )
+
+        if generated_code:
+
+            summary_parts.extend(
+                [
+                    "",
+                    "💻 Generated Code:",
+                    generated_code
+                ]
+            )
+
+        test_passed = result.get(
+            "test_passed"
+        )
+
+        if test_passed is True:
+
+            summary_parts.extend(
+                [
+                    "",
+                    "🧪 Unit Tests:",
+                    "✅ All generated tests passed."
+                ]
+            )
+
+        security_passed = result.get(
+            "security_passed"
+        )
+
+        if security_passed is True:
+
+            summary_parts.extend(
+                [
+                    "",
+                    "🔐 Security Review:",
+                    "✅ Security checks passed."
+                ]
+            )
+
+        branch_name = result.get(
+            "branch_name"
+        )
+
+        commit_message = result.get(
+            "commit_message"
+        )
+
+        mr_title = result.get(
+            "mr_title"
+        )
+
+        if branch_name:
+
+            summary_parts.extend(
+                [
+                    "",
+                    f"Branch: {branch_name}"
+                ]
+            )
+
+        if commit_message:
+
+            summary_parts.extend(
+                [
+                    f"Commit: {commit_message}"
+                ]
+            )
+
+        if mr_title:
+
+            summary_parts.extend(
+                [
+                    f"MR Title: {mr_title}"
+                ]
+            )
+
+        mr_url = result.get(
+            "mr_url"
+        )
+
+        if mr_url:
+
+            summary_parts.extend(
+                [
+                    "",
+                    f"Merge Request: {mr_url}"
+                ]
+            )
+
+        if len(summary_parts) == 1:
+
+            summary_parts.extend(
+                [
+                    "",
+                    "No additional workflow information available."
+                ]
+            )
+
+        add_message(
+            "\n".join(summary_parts)
+        )
 
         page.update()
 
@@ -698,7 +902,6 @@ def agent_view(page):
             message
         )
 
-        # Clear workflow state after completion
         current_thread_id = None
         current_intent = None
 
@@ -727,7 +930,6 @@ def agent_view(page):
             "No branch or Merge Request was created."
         )
 
-        # Clear workflow state after rejection
         current_thread_id = None
         current_intent = None
 

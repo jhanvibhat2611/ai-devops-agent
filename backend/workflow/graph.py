@@ -11,6 +11,8 @@ from workflow.nodes import (
     generate_code,
     unit_test_agent,
     unit_test_router,
+    security_agent,
+    security_router,
     human_approval,
     approval_router,
     create_branch,
@@ -47,6 +49,16 @@ builder.add_node(
 )
 
 builder.add_node(
+    "unit_test_agent",
+    unit_test_agent
+)
+
+builder.add_node(
+    "security_agent",
+    security_agent
+)
+
+builder.add_node(
     "human_approval",
     human_approval
 )
@@ -59,11 +71,6 @@ builder.add_node(
 builder.add_node(
     "commit_generated_code",
     commit_generated_code
-)
-
-builder.add_node(
-    "unit_test_agent",
-    unit_test_agent
 )
 
 builder.add_node(
@@ -96,7 +103,7 @@ builder.add_conditional_edges(
 
 
 # ============================================================
-# REQUIREMENT ANALYSIS FLOW
+# REQUIREMENT ANALYSIS
 # ============================================================
 
 builder.add_edge(
@@ -121,20 +128,35 @@ builder.add_edge(
 
 
 # ============================================================
-# UNIT TEST → HUMAN APPROVAL
+# UNIT TEST GATE
 # ============================================================
 
 builder.add_conditional_edges(
     "unit_test_agent",
     unit_test_router,
     {
+        "passed": "security_agent",
+        "failed": END
+    }
+)
+
+
+# ============================================================
+# SECURITY ANALYSIS
+# ============================================================
+
+builder.add_conditional_edges(
+    "security_agent",
+    security_router,
+    {
         "passed": "human_approval",
         "failed": END
     }
 )
 
+
 # ============================================================
-# HUMAN APPROVAL ROUTER
+# HUMAN APPROVAL
 # ============================================================
 
 builder.add_conditional_edges(

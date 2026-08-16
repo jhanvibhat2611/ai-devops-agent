@@ -17,6 +17,9 @@ class WorkflowState(TypedDict):
     test_result: str
     test_passed: bool
 
+    security_report: str
+    security_passed: bool
+
     branch_name: str
     commit_message: str
     mr_title: str

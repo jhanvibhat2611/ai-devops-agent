@@ -379,6 +379,7 @@ Therefore, return ONLY executable Python source code.
 
 def unit_test_agent(state: WorkflowState):
 
+    import ast
     import os
     import re
     import sys
@@ -396,7 +397,37 @@ def unit_test_agent(state: WorkflowState):
         }
 
     # ------------------------------------------------------------
-    # Ask Qwen to generate tests
+    # Extract source function/class names
+    # Used to prevent Qwen from simply copying the implementation
+    # ------------------------------------------------------------
+
+    try:
+
+        source_tree = ast.parse(generated_code)
+
+        source_function_names = {
+            node.name
+            for node in ast.walk(source_tree)
+            if isinstance(
+                node,
+                (
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef
+                )
+            )
+        }
+
+    except SyntaxError as error:
+
+        return {
+            "test_result": (
+                f"Generated source code is invalid Python: {error}"
+            ),
+            "test_passed": False
+        }
+
+    # ------------------------------------------------------------
+    # Test generation prompt
     # ------------------------------------------------------------
 
     prompt = f"""
@@ -411,40 +442,77 @@ SOURCE CODE
 {generated_code}
 
 ============================================================
-IMPORTANT TEST REQUIREMENTS
+CORE RULE
 ============================================================
 
-- Use pytest.
-- The source code will be saved as "generated_feature.py".
-- Import the required objects from generated_feature.
-- Do NOT recreate or rewrite the application code inside the test.
-- Test the actual code from generated_feature.py.
-- Test the main functionality of the generated code.
-- Test important edge cases only when they are actually relevant.
-- Do not invent functionality that does not exist.
+You are writing a TEST FILE.
+
+You are NOT rewriting the source code.
+
+The source code already exists in a file called:
+
+generated_feature.py
+
+Your test file will be:
+
+test_generated_feature.py
+
+The test file will import and test the code from
+generated_feature.py.
 
 ============================================================
-FASTAPI REQUIREMENT
+STRICT REQUIREMENTS
 ============================================================
 
-If the source code contains a FastAPI application named "app":
+1. You MUST generate at least one function whose name starts
+   with "test_".
 
-- Import it using:
+2. Every actual test must be a pytest test function.
+
+3. Do NOT recreate any function from the source code.
+
+4. Do NOT copy the implementation into the test file.
+
+5. Do NOT create another version of the application.
+
+6. Do NOT create another FastAPI app.
+
+7. Do NOT define the same functions that already exist in
+   generated_feature.py.
+
+8. Import the existing functions/classes/app from
+   generated_feature.py instead.
+
+9. Test the actual imported implementation.
+
+10. Use pytest appropriately.
+
+11. Test the main functionality.
+
+12. Test relevant edge cases when appropriate.
+
+13. Do not invent functionality that does not exist.
+
+============================================================
+FASTAPI TESTING
+============================================================
+
+If the source code contains:
+
+app = FastAPI()
+
+use:
 
 from generated_feature import app
-
-- Use FastAPI's TestClient:
-
 from fastapi.testclient import TestClient
-
-- Create the client using:
 
 client = TestClient(app)
 
-- Do NOT use:
-  app.test_client()
+Do NOT use:
 
-- Do NOT use Flask testing APIs.
+app.test_client()
+
+Do NOT use Flask testing APIs.
 
 For example, if the source code contains:
 
@@ -452,35 +520,85 @@ For example, if the source code contains:
 def health_check():
     return {{"status": "healthy"}}
 
-the test should use:
+generate a test such as:
 
-response = client.get("/health")
+def test_health_check():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {{"status": "healthy"}}
 
-and verify:
+============================================================
+NORMAL PYTHON FUNCTIONS
+============================================================
 
-response.status_code == 200
+If the source code contains a normal Python function such as:
 
-and:
+def add(a, b):
+    return a + b
 
-response.json() == {{"status": "healthy"}}
+generate a test such as:
+
+def test_add():
+    assert add(2, 3) == 5
+
+Do NOT redefine add().
+
+============================================================
+SIDE EFFECTS
+============================================================
+
+If the source code uses things such as:
+
+- input()
+- os.system()
+- subprocess
+- file operations
+- external services
+
+do NOT execute dangerous real-world operations during testing.
+
+Use pytest tools such as:
+
+- monkeypatch
+- mocks
+- temporary files
+
+when appropriate.
+
+For example, if a function calls input(), monkeypatch input()
+instead of waiting for real user input.
+
+If a function calls os.system(), mock os.system() instead of
+actually executing a system command.
 
 ============================================================
 OUTPUT REQUIREMENTS
 ============================================================
 
-- Return ONLY executable Python test code.
-- Do NOT include explanations.
-- Do NOT include Markdown.
-- Do NOT use Markdown code fences.
-- Do NOT include text before or after the Python code.
-- Do NOT include the original source code again.
-- Do NOT include comments explaining the answer.
+Return ONLY valid executable Python test code.
 
-The generated response will be saved directly as a Python
-test file and executed using pytest.
+Do NOT return:
 
-Therefore, return ONLY valid Python code.
+- explanations
+- Markdown
+- Markdown code fences
+- the original source code
+- copied implementations
+- text before the tests
+- text after the tests
+
+The response will be saved directly as:
+
+test_generated_feature.py
+
+and executed using pytest.
+
+Therefore, return ONLY the test code.
 """
+
+    # ------------------------------------------------------------
+    # Generate tests
+    # ------------------------------------------------------------
 
     print("🤖 Generating tests using Qwen...")
 
@@ -489,7 +607,7 @@ Therefore, return ONLY valid Python code.
     test_code = response.content.strip()
 
     # ------------------------------------------------------------
-    # Remove accidental Markdown code fences
+    # Remove accidental Markdown fences
     # ------------------------------------------------------------
 
     fenced_match = re.search(
@@ -506,43 +624,198 @@ Therefore, return ONLY valid Python code.
 
         lines = test_code.splitlines()
 
-        # Remove accidental opening fence
         if lines and lines[0].strip().startswith("```"):
             lines = lines[1:]
 
-        # Remove accidental closing fence
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
 
         test_code = "\n".join(lines).strip()
 
     # ------------------------------------------------------------
-    # Make sure generated tests import the generated source
+    # Validate generated test code
     # ------------------------------------------------------------
 
-    if "from generated_feature import" not in test_code:
+    def validate_test_code(code):
 
-        test_code = (
-            "from generated_feature import *\n\n"
-            + test_code
-        )
+        try:
+
+            tree = ast.parse(code)
+
+        except SyntaxError as error:
+
+            return False, (
+                f"Generated tests contain invalid Python: {error}"
+            )
+
+        # Find actual pytest test functions
+        test_functions = [
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(
+                node,
+                (
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef
+                )
+            )
+            and node.name.startswith("test_")
+        ]
+
+        # --------------------------------------------------------
+        # No test functions = not a test file
+        # --------------------------------------------------------
+
+        if not test_functions:
+
+            return False, (
+                "Qwen did not generate any pytest test functions."
+            )
+
+        # --------------------------------------------------------
+        # Detect copied source implementation
+        # --------------------------------------------------------
+
+        copied_functions = [
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(
+                node,
+                (
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef
+                )
+            )
+            and node.name in source_function_names
+            and not node.name.startswith("test_")
+        ]
+
+        if copied_functions:
+
+            return False, (
+                "Qwen recreated source functions instead of "
+                f"testing them: {', '.join(copied_functions)}"
+            )
+
+        return True, ""
+
+    valid_tests, validation_message = validate_test_code(
+        test_code
+    )
 
     # ------------------------------------------------------------
-    # Validate generated test syntax
+    # Retry once if Qwen failed to produce actual tests
     # ------------------------------------------------------------
 
-    try:
-
-        compile(
-            test_code,
-            "generated_test.py",
-            "exec"
-        )
-
-    except SyntaxError as error:
+    if not valid_tests:
 
         print(
-            f"❌ Generated tests contain invalid Python: {error}"
+            f"⚠️ Initial test generation rejected: "
+            f"{validation_message}"
+        )
+
+        print(
+            "🔄 Asking Qwen to regenerate the tests..."
+        )
+
+        retry_prompt = f"""
+You previously failed to generate a valid test file.
+
+Generate ONLY pytest tests for this Python source code:
+
+============================================================
+SOURCE CODE
+============================================================
+
+{generated_code}
+
+============================================================
+ABSOLUTE RULES
+============================================================
+
+The source code already exists in:
+
+generated_feature.py
+
+You MUST import and test it.
+
+DO NOT recreate any source function.
+
+DO NOT copy the implementation.
+
+DO NOT create another application.
+
+You MUST generate at least ONE function whose name starts
+with:
+
+test_
+
+Every test must actually test something.
+
+If this is FastAPI, use:
+
+from generated_feature import app
+from fastapi.testclient import TestClient
+
+client = TestClient(app)
+
+Do NOT use Flask's app.test_client().
+
+If the source uses input(), os.system(), subprocess, or other
+side effects, mock them instead of performing real operations.
+
+Return ONLY valid Python pytest code.
+
+No Markdown.
+No code fences.
+No explanations.
+"""
+
+        retry_response = llm1.invoke(
+            retry_prompt
+        )
+
+        test_code = retry_response.content.strip()
+
+        # Remove fences from retry response
+
+        fenced_match = re.search(
+            r"```(?:python|py)?\s*(.*?)```",
+            test_code,
+            re.DOTALL | re.IGNORECASE
+        )
+
+        if fenced_match:
+
+            test_code = fenced_match.group(1).strip()
+
+        else:
+
+            lines = test_code.splitlines()
+
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+
+            test_code = "\n".join(lines).strip()
+
+        # Validate retry
+
+        valid_tests, validation_message = validate_test_code(
+            test_code
+        )
+
+    # ------------------------------------------------------------
+    # Stop if Qwen still did not generate valid tests
+    # ------------------------------------------------------------
+
+    if not valid_tests:
+
+        print(
+            f"❌ Unit test generation failed: "
+            f"{validation_message}"
         )
 
         print(
@@ -552,11 +825,13 @@ Therefore, return ONLY valid Python code.
         print("=======================================")
 
         return {
-            "test_result": (
-                f"Generated tests contain invalid Python: {error}"
-            ),
+            "test_result": validation_message,
             "test_passed": False
         }
+
+    # ------------------------------------------------------------
+    # Print generated tests
+    # ------------------------------------------------------------
 
     print("\n========== GENERATED TESTS ==========")
     print(test_code)
@@ -603,8 +878,7 @@ Therefore, return ONLY valid Python code.
             file.write(test_code)
 
         # --------------------------------------------------------
-        # Run pytest using the same Python interpreter
-        # running the backend
+        # Run pytest using the backend's Python interpreter
         # --------------------------------------------------------
 
         print("\n🧪 Running pytest...")
@@ -662,9 +936,427 @@ Therefore, return ONLY valid Python code.
                 "test_result": test_output,
                 "test_passed": False
             }
+def security_agent(state: WorkflowState):
+
+    import ast
+    import json
+    import re
+
+    print("\n========== SECURITY AGENT ==========")
+
+    generated_code = state["generated_code"]
+
+    if not generated_code.strip():
+        return {
+            "security_report": "No generated code available for security analysis.",
+            "security_passed": False
+        }
+
+    # ------------------------------------------------------------
+    # Basic deterministic security checks
+    # ------------------------------------------------------------
+
+    security_flags = []
+
+    try:
+        tree = ast.parse(generated_code)
+
+        for node in ast.walk(tree):
+
+            # Dangerous dynamic execution
+            if isinstance(node, ast.Call):
+
+                if isinstance(node.func, ast.Name):
+
+                    if node.func.id in {
+                        "eval",
+                        "exec",
+                        "__import__"
+                    }:
+                        security_flags.append(
+                            f"Potentially dangerous function: {node.func.id}()"
+                        )
+
+                if isinstance(node.func, ast.Attribute):
+
+                    # os.system(...)
+                    if (
+                        node.func.attr == "system"
+                    ):
+                        security_flags.append(
+                            "Potential command execution through os.system()."
+                        )
+
+                    # subprocess calls
+                    if (
+                        node.func.attr in {
+                            "Popen",
+                            "call",
+                            "run"
+                        }
+                    ):
+                        for keyword in node.keywords:
+                            if (
+                                keyword.arg == "shell"
+                                and isinstance(keyword.value, ast.Constant)
+                                and keyword.value.value is True
+                            ):
+                                security_flags.append(
+                                    "subprocess call uses shell=True."
+                                )
+
+            # Hardcoded credential-like assignments
+            if isinstance(node, ast.Assign):
+
+                for target in node.targets:
+
+                    if isinstance(target, ast.Name):
+
+                        variable_name = target.id.lower()
+
+                        sensitive_names = {
+                            "password",
+                            "passwd",
+                            "secret",
+                            "api_key",
+                            "apikey",
+                            "access_token",
+                            "auth_token",
+                            "private_key"
+                        }
+
+                        if variable_name in sensitive_names:
+
+                            if isinstance(node.value, ast.Constant):
+
+                                if isinstance(
+                                    node.value.value,
+                                    str
+                                ) and node.value.value.strip():
+
+                                    security_flags.append(
+                                        f"Potential hardcoded secret in variable '{target.id}'."
+                                    )
+
+    except SyntaxError as error:
+
+        return {
+            "security_report": (
+                f"Generated code could not be parsed for security analysis: {error}"
+            ),
+            "security_passed": False
+        }
+
+    # ------------------------------------------------------------
+    # Build deterministic findings
+    # ------------------------------------------------------------
+
+    deterministic_findings = "\n".join(
+        f"- {flag}"
+        for flag in security_flags
+    )
+
+    if not deterministic_findings:
+        deterministic_findings = "No obvious security issues detected by static checks."
+
+    # ------------------------------------------------------------
+    # Ask Qwen for deeper security analysis
+    # ------------------------------------------------------------
+
+    prompt = f"""
+You are a senior application security engineer reviewing
+Python code before it is committed to a GitLab repository.
+
+Analyze the following generated Python code for security risks.
+
+============================================================
+GENERATED CODE
+============================================================
+
+{generated_code}
+
+============================================================
+STATIC SECURITY CHECKS
+============================================================
+
+{deterministic_findings}
+
+============================================================
+SECURITY REVIEW REQUIREMENTS
+============================================================
+
+Look specifically for:
+
+1. Hardcoded passwords, API keys, tokens, or secrets.
+2. SQL injection risks.
+3. Command injection risks.
+4. Unsafe use of eval(), exec(), or dynamic code execution.
+5. Unsafe subprocess usage.
+6. Path traversal vulnerabilities.
+7. Unsafe deserialization.
+8. Missing authentication/authorization where clearly required.
+9. Insecure handling of user-controlled input.
+10. Other serious security vulnerabilities.
+
+Do NOT report something as a vulnerability merely because
+it is theoretically possible.
+
+Only report issues that are actually relevant to the code.
+
+============================================================
+SEVERITY
+============================================================
+
+Use only:
+
+CRITICAL
+HIGH
+MEDIUM
+LOW
+NONE
+
+CRITICAL/HIGH:
+A serious security vulnerability that should block the change.
+
+MEDIUM:
+A meaningful security concern that should be reviewed.
+
+LOW:
+A minor security improvement.
+
+NONE:
+No meaningful security issue found.
+
+============================================================
+OUTPUT
+============================================================
+
+Return ONLY valid JSON.
+
+Use exactly this structure:
+
+{{
+    "overall_status": "PASS",
+    "findings": [
+        {{
+            "severity": "NONE",
+            "issue": "No security issues found.",
+            "recommendation": ""
+        }}
+    ],
+    "summary": "..."
+}}
+
+Rules:
+
+- overall_status must be either PASS or FAIL.
+- Use FAIL only if there is at least one CRITICAL or HIGH issue.
+- Use PASS for NONE, LOW, and MEDIUM findings.
+- Do not include Markdown.
+- Do not include explanations outside the JSON.
+- Return valid JSON only.
+"""
+
+    print("🔐 Analyzing generated code with Qwen...")
+
+    response = llm1.invoke(prompt)
+
+    security_response = response.content.strip()
+
+    # ------------------------------------------------------------
+    # Remove accidental Markdown fences
+    # ------------------------------------------------------------
+
+    fenced_match = re.search(
+        r"```(?:json)?\s*(.*?)```",
+        security_response,
+        re.DOTALL | re.IGNORECASE
+    )
+
+    if fenced_match:
+        security_response = fenced_match.group(1).strip()
+
+    # ------------------------------------------------------------
+    # Extract JSON
+    # ------------------------------------------------------------
+
+    json_start = security_response.find("{")
+    json_end = security_response.rfind("}") + 1
+
+    if json_start == -1 or json_end == 0:
+
+        print("❌ Qwen returned invalid security analysis.")
+
+        return {
+            "security_report": (
+                "Security analysis failed because the model "
+                "did not return valid JSON."
+            ),
+            "security_passed": False
+        }
+
+    json_text = security_response[
+        json_start:json_end
+    ]
+
+    try:
+
+        security_data = json.loads(json_text)
+
+    except json.JSONDecodeError as error:
+
+        print("❌ Could not parse security analysis.")
+
+        return {
+            "security_report": (
+                f"Invalid security analysis JSON: {error}"
+            ),
+            "security_passed": False
+        }
+
+    # ------------------------------------------------------------
+    # Determine whether security gate passes
+    # ------------------------------------------------------------
+
+    findings = security_data.get(
+        "findings",
+        []
+    )
+
+    overall_status = security_data.get(
+        "overall_status",
+        "FAIL"
+    )
+
+    high_risk_findings = []
+
+    for finding in findings:
+
+        severity = str(
+            finding.get("severity", "NONE")
+        ).upper()
+
+        if severity in {
+            "CRITICAL",
+            "HIGH"
+        }:
+            high_risk_findings.append(
+                finding
+            )
+
+    # ------------------------------------------------------------
+    # Combine static findings with AI findings
+    # ------------------------------------------------------------
+
+    report_lines = []
+
+    report_lines.append(
+        f"Overall Status: {overall_status}"
+    )
+
+    report_lines.append(
+        f"Summary: {security_data.get('summary', '')}"
+    )
+
+    report_lines.append(
+        "\nSecurity Findings:"
+    )
+
+    if findings:
+
+        for index, finding in enumerate(
+            findings,
+            start=1
+        ):
+
+            severity = finding.get(
+                "severity",
+                "NONE"
+            )
+
+            issue = finding.get(
+                "issue",
+                ""
+            )
+
+            recommendation = finding.get(
+                "recommendation",
+                ""
+            )
+
+            report_lines.append(
+                f"{index}. [{severity}] {issue}"
+            )
+
+            if recommendation:
+
+                report_lines.append(
+                    f"   Recommendation: {recommendation}"
+                )
+
+    else:
+
+        report_lines.append(
+            "No security findings."
+        )
+
+    if security_flags:
+
+        report_lines.append(
+            "\nStatic Security Checks:"
+        )
+
+        for flag in security_flags:
+
+            report_lines.append(
+                f"- {flag}"
+            )
+
+    security_report = "\n".join(
+        report_lines
+    )
+
+    security_passed = (
+        overall_status == "PASS"
+        and not high_risk_findings
+        and not security_flags
+    )
+
+    # ------------------------------------------------------------
+    # Final output
+    # ------------------------------------------------------------
+
+    print("\n========== SECURITY RESULT ==========")
+    print(security_report)
+    print("=====================================")
+
+    if security_passed:
+
+        print(
+            "✅ Security checks passed."
+        )
+
+    else:
+
+        print(
+            "❌ Security checks failed."
+        )
+
+    return {
+        "security_report": security_report,
+        "security_passed": security_passed
+    }
+
 def unit_test_router(state: WorkflowState):
 
     if state["test_passed"]:
+        return "passed"
+
+    return "failed"
+
+def security_router(state: WorkflowState):
+
+    if state["security_passed"]:
         return "passed"
 
     return "failed"
