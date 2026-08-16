@@ -288,7 +288,7 @@ IMPORTANT REQUIREMENTS
 The generated code will be written directly into a Python file
 inside a local GitLab repository.
 
-Therefore the response must contain ONLY valid Python code.
+Therefore, return ONLY executable Python source code.
 """
 
     print("🤖 Generating code using Qwen...")
@@ -297,27 +297,56 @@ Therefore the response must contain ONLY valid Python code.
 
     generated_code = response.content.strip()
 
-    # --------------------------------------------------------
-    # Remove accidental Markdown code fences
-    # --------------------------------------------------------
+    # ------------------------------------------------------------
+    # Clean accidental Markdown code fences
+    # ------------------------------------------------------------
 
-    if generated_code.startswith("```"):
+    lines = generated_code.splitlines()
 
-        lines = generated_code.splitlines()
+    opening_fence_index = None
+    closing_fence_index = None
 
-        if lines and lines[0].strip().startswith("```"):
-            lines = lines[1:]
+    # Find the first Markdown code fence
+    for index, line in enumerate(lines):
 
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
+        if line.strip().startswith("```"):
+            opening_fence_index = index
+            break
+
+    # If a code fence exists, extract only the code inside it
+    if opening_fence_index is not None:
+
+        for index in range(
+            opening_fence_index + 1,
+            len(lines)
+        ):
+
+            if lines[index].strip() == "```":
+                closing_fence_index = index
+                break
+
+        if closing_fence_index is not None:
+
+            lines = lines[
+                opening_fence_index + 1:
+                closing_fence_index
+            ]
+
+        else:
+
+            # Opening fence exists but no closing fence
+            lines = lines[
+                opening_fence_index + 1:
+            ]
 
         generated_code = "\n".join(lines).strip()
 
-    # --------------------------------------------------------
+    # ------------------------------------------------------------
     # Validate generated Python
-    # --------------------------------------------------------
+    # ------------------------------------------------------------
 
     try:
+
         compile(
             generated_code,
             "<generated_code>",
@@ -327,11 +356,18 @@ Therefore the response must contain ONLY valid Python code.
     except SyntaxError as error:
 
         print("❌ Qwen generated invalid Python.")
+
+        print("\n========== INVALID GENERATED CODE ==========")
         print(generated_code)
+        print("============================================")
 
         raise ValueError(
             "Generated code contains invalid Python syntax."
         ) from error
+
+    # ------------------------------------------------------------
+    # Final generated code
+    # ------------------------------------------------------------
 
     print("\n========== GENERATED CODE ==========")
     print(generated_code)
@@ -341,10 +377,301 @@ Therefore the response must contain ONLY valid Python code.
         "generated_code": generated_code
     }
 
+def unit_test_agent(state: WorkflowState):
 
+    import os
+    import re
+    import sys
+    import subprocess
+    import tempfile
+
+    print("\n========== UNIT TEST AGENT ==========")
+
+    generated_code = state["generated_code"]
+
+    if not generated_code.strip():
+        return {
+            "test_result": "No generated code available for testing.",
+            "test_passed": False
+        }
+
+    # ------------------------------------------------------------
+    # Ask Qwen to generate tests
+    # ------------------------------------------------------------
+
+    prompt = f"""
+You are a senior Python test engineer.
+
+Generate pytest unit tests for the following Python source code.
+
+============================================================
+SOURCE CODE
+============================================================
+
+{generated_code}
+
+============================================================
+IMPORTANT TEST REQUIREMENTS
+============================================================
+
+- Use pytest.
+- The source code will be saved as "generated_feature.py".
+- Import the required objects from generated_feature.
+- Do NOT recreate or rewrite the application code inside the test.
+- Test the actual code from generated_feature.py.
+- Test the main functionality of the generated code.
+- Test important edge cases only when they are actually relevant.
+- Do not invent functionality that does not exist.
+
+============================================================
+FASTAPI REQUIREMENT
+============================================================
+
+If the source code contains a FastAPI application named "app":
+
+- Import it using:
+
+from generated_feature import app
+
+- Use FastAPI's TestClient:
+
+from fastapi.testclient import TestClient
+
+- Create the client using:
+
+client = TestClient(app)
+
+- Do NOT use:
+  app.test_client()
+
+- Do NOT use Flask testing APIs.
+
+For example, if the source code contains:
+
+@app.get("/health")
+def health_check():
+    return {{"status": "healthy"}}
+
+the test should use:
+
+response = client.get("/health")
+
+and verify:
+
+response.status_code == 200
+
+and:
+
+response.json() == {{"status": "healthy"}}
+
+============================================================
+OUTPUT REQUIREMENTS
+============================================================
+
+- Return ONLY executable Python test code.
+- Do NOT include explanations.
+- Do NOT include Markdown.
+- Do NOT use Markdown code fences.
+- Do NOT include text before or after the Python code.
+- Do NOT include the original source code again.
+- Do NOT include comments explaining the answer.
+
+The generated response will be saved directly as a Python
+test file and executed using pytest.
+
+Therefore, return ONLY valid Python code.
+"""
+
+    print("🤖 Generating tests using Qwen...")
+
+    response = llm1.invoke(prompt)
+
+    test_code = response.content.strip()
+
+    # ------------------------------------------------------------
+    # Remove accidental Markdown code fences
+    # ------------------------------------------------------------
+
+    fenced_match = re.search(
+        r"```(?:python|py)?\s*(.*?)```",
+        test_code,
+        re.DOTALL | re.IGNORECASE
+    )
+
+    if fenced_match:
+
+        test_code = fenced_match.group(1).strip()
+
+    else:
+
+        lines = test_code.splitlines()
+
+        # Remove accidental opening fence
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+
+        # Remove accidental closing fence
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+
+        test_code = "\n".join(lines).strip()
+
+    # ------------------------------------------------------------
+    # Make sure generated tests import the generated source
+    # ------------------------------------------------------------
+
+    if "from generated_feature import" not in test_code:
+
+        test_code = (
+            "from generated_feature import *\n\n"
+            + test_code
+        )
+
+    # ------------------------------------------------------------
+    # Validate generated test syntax
+    # ------------------------------------------------------------
+
+    try:
+
+        compile(
+            test_code,
+            "generated_test.py",
+            "exec"
+        )
+
+    except SyntaxError as error:
+
+        print(
+            f"❌ Generated tests contain invalid Python: {error}"
+        )
+
+        print(
+            "\n========== INVALID TEST CODE =========="
+        )
+        print(test_code)
+        print("=======================================")
+
+        return {
+            "test_result": (
+                f"Generated tests contain invalid Python: {error}"
+            ),
+            "test_passed": False
+        }
+
+    print("\n========== GENERATED TESTS ==========")
+    print(test_code)
+    print("=====================================")
+
+    # ------------------------------------------------------------
+    # Create temporary testing directory
+    # ------------------------------------------------------------
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+
+        source_file = os.path.join(
+            temp_dir,
+            "generated_feature.py"
+        )
+
+        test_file = os.path.join(
+            temp_dir,
+            "test_generated_feature.py"
+        )
+
+        # --------------------------------------------------------
+        # Write generated source code
+        # --------------------------------------------------------
+
+        with open(
+            source_file,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            file.write(generated_code)
+
+        # --------------------------------------------------------
+        # Write generated tests
+        # --------------------------------------------------------
+
+        with open(
+            test_file,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            file.write(test_code)
+
+        # --------------------------------------------------------
+        # Run pytest using the same Python interpreter
+        # running the backend
+        # --------------------------------------------------------
+
+        print("\n🧪 Running pytest...")
+
+        print(
+            "Python interpreter:",
+            sys.executable
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                test_file,
+                "-v"
+            ],
+            cwd=temp_dir,
+            capture_output=True,
+            text=True
+        )
+
+        test_output = (
+            result.stdout
+            + "\n"
+            + result.stderr
+        ).strip()
+
+        print("\n========== TEST RESULT ==========")
+        print(test_output)
+        print("=================================")
+
+        # --------------------------------------------------------
+        # Determine result
+        # --------------------------------------------------------
+
+        if result.returncode == 0:
+
+            print(
+                "✅ All generated tests passed."
+            )
+
+            return {
+                "test_result": test_output,
+                "test_passed": True
+            }
+
+        else:
+
+            print(
+                "❌ Generated tests failed."
+            )
+
+            return {
+                "test_result": test_output,
+                "test_passed": False
+            }
+def unit_test_router(state: WorkflowState):
+
+    if state["test_passed"]:
+        return "passed"
+
+    return "failed"
 # ============================================================
 # CREATE GITLAB BRANCH
 # ============================================================
+
 
 def create_branch(state: WorkflowState):
 

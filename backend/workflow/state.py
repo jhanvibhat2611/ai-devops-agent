@@ -2,6 +2,7 @@ from typing import TypedDict
 
 
 class WorkflowState(TypedDict):
+
     user_request: str
 
     request_valid: bool
@@ -12,6 +13,9 @@ class WorkflowState(TypedDict):
     analysis: str
 
     generated_code: str
+
+    test_result: str
+    test_passed: bool
 
     branch_name: str
     commit_message: str

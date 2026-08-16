@@ -9,6 +9,8 @@ from workflow.nodes import (
     retrieve_context,
     analyze_requirement,
     generate_code,
+    unit_test_agent,
+    unit_test_router,
     human_approval,
     approval_router,
     create_branch,
@@ -60,6 +62,11 @@ builder.add_node(
 )
 
 builder.add_node(
+    "unit_test_agent",
+    unit_test_agent
+)
+
+builder.add_node(
     "create_merge_request",
     create_merge_request
 )
@@ -104,14 +111,27 @@ builder.add_edge(
 
 
 # ============================================================
-# CODE GENERATION → HUMAN APPROVAL
+# CODE GENERATION → UNIT TESTING
 # ============================================================
 
 builder.add_edge(
     "generate_code",
-    "human_approval"
+    "unit_test_agent"
 )
 
+
+# ============================================================
+# UNIT TEST → HUMAN APPROVAL
+# ============================================================
+
+builder.add_conditional_edges(
+    "unit_test_agent",
+    unit_test_router,
+    {
+        "passed": "human_approval",
+        "failed": END
+    }
+)
 
 # ============================================================
 # HUMAN APPROVAL ROUTER
