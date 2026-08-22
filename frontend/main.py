@@ -1,5 +1,6 @@
 import flet as ft
 from login import show_login
+from storage import initialize_database
 
 
 def main(page: ft.Page):
@@ -11,5 +12,7 @@ def main(page: ft.Page):
 
     show_login(page)
 
+
+initialize_database()
 
 ft.app(target=main)

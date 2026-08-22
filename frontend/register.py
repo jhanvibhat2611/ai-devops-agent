@@ -1,5 +1,5 @@
 import flet as ft
-from storage import load_users, save_users
+from storage import create_user
 from chat import show_chat
 
 def show_register(page: ft.Page):
@@ -41,15 +41,12 @@ def show_register(page: ft.Page):
             page.update()
             return
 
-        users = load_users()
-
-        users[username.value] = {
-            "password": password.value,
-            "gitlab_username": gitlab_username.value,
-            "gitlab_token": gitlab_token.value,
-        }
-
-        save_users(users)
+        create_user(
+            username.value,
+            password.value,
+            gitlab_username.value,
+            gitlab_token.value,
+        )
         show_chat(page)
 
         page.snack_bar = ft.SnackBar(

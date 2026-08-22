@@ -53,7 +53,6 @@ def review_view(page: ft.Page):
     def suggest(e):
 
         if not mr_id.value:
-
             page.snack_bar = ft.SnackBar(
                 ft.Text("Please enter a Merge Request ID.")
             )
@@ -63,9 +62,27 @@ def review_view(page: ft.Page):
 
         result = suggest_merge_request(mr_id.value)
 
-        if "suggestion" in result:
+        if "suggestions" in result:
 
-            suggestion_output.value = result["suggestion"]
+            suggestions = result["suggestions"]
+
+            if not suggestions:
+
+                suggestion_output.value = (
+                    "No suggestions generated."
+                )
+
+            else:
+
+                formatted_suggestions = ""
+
+                for suggestion in suggestions:
+                    formatted_suggestions += (
+                        f"File: {suggestion.get('file', 'Unknown')}\n"
+                        f"Suggestion: {suggestion.get('suggestion', '')}\n\n"
+                    )
+
+                suggestion_output.value = formatted_suggestions
 
         else:
 
