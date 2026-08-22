@@ -23,6 +23,8 @@ class WorkflowState(TypedDict):
     branch_name: str
     commit_message: str
     mr_title: str
+
+    mr_iid: int
     mr_url: str
 
     approved: bool

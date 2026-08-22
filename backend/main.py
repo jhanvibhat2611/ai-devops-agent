@@ -4,9 +4,7 @@ from dotenv import load_dotenv
 import os
 import json
 import re
-from pydantic import BaseModel
 from elasticsearch_client import (
-    index_merge_request,
     search_merge_requests,
     merge_request_exists,
     get_merge_request_from_es,
@@ -16,7 +14,20 @@ from elasticsearch_client import (
 )
 from ai_review import review_code,suggest_code
 import uuid
+import sys
+import os
 
+sys.path.append(
+    os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "frontend"
+        )
+    )
+)
+
+from storage import save_merge_request_approval
 from pydantic import BaseModel
 from langgraph.types import Command
 
@@ -59,6 +70,7 @@ class ChatRequest(BaseModel):
 class ChatDecisionRequest(BaseModel):
     thread_id: str
     approved: bool
+    username: str
 
 class SuggestionRequest(BaseModel):
     file: str
@@ -1583,6 +1595,23 @@ async def chat_decision(request: ChatDecisionRequest):
         Command(resume=request.approved),
         config=config
     )
+
+    # Save the user's decision in SQLite
+    mr_iid = result.get("mr_iid")
+    username = result.get("username", "unknown")
+
+    status = (
+        "approved"
+        if request.approved
+        else "rejected"
+    )
+
+    if mr_iid:
+        save_merge_request_approval(
+            mr_iid=mr_iid,
+            username=username,
+            status=status
+        )
 
     if request.approved:
 

@@ -18,8 +18,13 @@ from workflow.nodes import (
     create_branch,
     commit_generated_code,
     create_merge_request,
+    save_approval_history,
 )
 
+
+# ============================================================
+# CREATE GRAPH
+# ============================================================
 
 builder = StateGraph(WorkflowState)
 
@@ -76,6 +81,11 @@ builder.add_node(
 builder.add_node(
     "create_merge_request",
     create_merge_request
+)
+
+builder.add_node(
+    "save_approval_history",
+    save_approval_history
 )
 
 
@@ -185,6 +195,11 @@ builder.add_edge(
 
 builder.add_edge(
     "create_merge_request",
+    "save_approval_history"
+)
+
+builder.add_edge(
+    "save_approval_history",
     END
 )
 

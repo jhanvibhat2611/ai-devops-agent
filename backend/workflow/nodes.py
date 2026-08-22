@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import subprocess
 
 from dotenv import load_dotenv
@@ -1618,6 +1617,7 @@ def create_merge_request(state: WorkflowState):
     )
 
     return {
+        "mr_iid": result.get("iid"),
         "mr_url": result.get(
             "web_url",
             ""
@@ -1656,3 +1656,30 @@ def approval_router(state: WorkflowState):
 
     return "rejected"
 
+def save_approval_history(state: WorkflowState):
+
+    from frontend.storage import save_merge_request_approval
+
+    mr_iid = state.get("mr_iid")
+
+    if not mr_iid:
+        print("⚠️ No MR IID found. Approval history not saved.")
+
+        return {}
+
+    # Temporary username until we connect the logged-in user
+    username = "current_user"
+
+    save_merge_request_approval(
+        mr_iid=mr_iid,
+        username=username,
+        status="approved"
+    )
+
+    print("\n========== APPROVAL HISTORY ==========")
+    print("MR IID:", mr_iid)
+    print("Username:", username)
+    print("Status: approved")
+    print("======================================")
+
+    return {}

@@ -279,3 +279,6 @@ if __name__ == "__main__":
         print(user)
 
     connection.close()
+
+if __name__ == "__main__":
+    print(get_gitlab_token("jj"))
