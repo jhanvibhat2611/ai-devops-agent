@@ -2,7 +2,7 @@ from typing import TypedDict
 
 
 class WorkflowState(TypedDict):
-
+    username: str
     user_request: str
 
     request_valid: bool

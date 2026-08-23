@@ -4,8 +4,19 @@ import os
 from cryptography.fernet import Fernet
 
 
-DB_NAME = "users.db"
-KEY_FILE = "secret.key"
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+DB_NAME = os.path.join(
+    BASE_DIR,
+    "users.db"
+)
+
+KEY_FILE = os.path.join(
+    BASE_DIR,
+    "secret.key"
+)
 
 
 # ============================================================

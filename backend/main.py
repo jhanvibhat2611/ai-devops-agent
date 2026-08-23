@@ -26,8 +26,19 @@ sys.path.append(
         )
     )
 )
+from datetime import datetime, timedelta, timezone
+import jwt
+from fastapi import HTTPException
 
-from storage import save_merge_request_approval
+
+from storage.auth import (
+    verify_user,
+    get_user,
+    get_gitlab_token
+)
+from storage.database import (
+    save_merge_request_approval
+)
 from pydantic import BaseModel
 from langgraph.types import Command
 
@@ -37,6 +48,10 @@ from urllib.parse import quote
 chat_sessions = {}
 # created a FastAPI application
 app = FastAPI()
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "super-secret-key")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = 24
 
 # Load environment variables from .env
 load_dotenv()
@@ -77,6 +92,10 @@ class SuggestionRequest(BaseModel):
     # previous_code: str
     current_code: str
     suggested_code: str
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 #reusable gitlab function for get
 def make_gitlab_request(endpoint: str):
@@ -1592,34 +1611,24 @@ async def chat_decision(request: ChatDecisionRequest):
     }
 
     result = graph.invoke(
-        Command(resume=request.approved),
+        Command(
+            update={
+                "username": request.username
+            },
+            resume=request.approved
+        ),
         config=config
     )
-
-    # Save the user's decision in SQLite
-    mr_iid = result.get("mr_iid")
-    username = result.get("username", "unknown")
-
-    status = (
-        "approved"
-        if request.approved
-        else "rejected"
-    )
-
-    if mr_iid:
-        save_merge_request_approval(
-            mr_iid=mr_iid,
-            username=username,
-            status=status
-        )
 
     if request.approved:
 
         return {
             "status": "completed",
             "thread_id": request.thread_id,
-            "mr_url": result.get("mr_url", ""),
-            "result": result
+            "mr_url": result.get(
+                "mr_url",
+                ""
+            )
         }
 
     return {
@@ -1627,7 +1636,6 @@ async def chat_decision(request: ChatDecisionRequest):
         "thread_id": request.thread_id,
         "message": "Workflow rejected by user."
     }
-
 @app.post("/webhook/gitlab")
 async def gitlab_webhook(payload: dict):
 
@@ -2088,4 +2096,39 @@ async def gitlab_webhook(payload: dict):
     return {
         "status": "ignored",
         "event_type": event_type
+    }
+
+@app.post("/login")
+async def login_user(user: LoginRequest):
+
+    if not verify_user(
+        user.username,
+        user.password
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password"
+        )
+
+    expiration = datetime.now(
+        timezone.utc
+    ) + timedelta(
+        hours=JWT_EXPIRE_HOURS
+    )
+
+    payload = {
+        "sub": user.username,
+        "exp": expiration
+    }
+
+    token = jwt.encode(
+        payload,
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM
+    )
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "username": user.username
     }

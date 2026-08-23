@@ -10,7 +10,8 @@ from api import (
 
 
 def agent_view(page):
-
+    token = getattr(page, "auth_token", None)
+    username = getattr(page, "username", None)
     messages = ft.Column(
         scroll=ft.ScrollMode.AUTO,
         expand=True,
@@ -109,7 +110,8 @@ def agent_view(page):
 
         response = start_chat(
             message,
-            current_thread_id
+            current_thread_id,
+            token
         )
 
         # --------------------------------------------------------
@@ -235,7 +237,8 @@ def agent_view(page):
 
                     selected_response = start_chat(
                         selected_message,
-                        current_thread_id
+                        current_thread_id,
+                        token
                     )
 
                     if selected_response.get(
@@ -863,7 +866,7 @@ def agent_view(page):
     # APPROVE WORKFLOW
     # ============================================================
 
-    def approve(e):
+    async def approve(e):
 
         nonlocal current_thread_id
         nonlocal current_intent
@@ -871,9 +874,19 @@ def agent_view(page):
         if not current_thread_id:
             return
 
+        username = await page.shared_preferences.get(
+            "username"
+        )
+
+        token = await page.shared_preferences.get(
+            "access_token"
+        )
+
         response = send_chat_decision(
             current_thread_id,
-            True
+            True,
+            username,
+            token
         )
 
         mr_url = response.get(
@@ -911,7 +924,7 @@ def agent_view(page):
     # REJECT WORKFLOW
     # ============================================================
 
-    def reject(e):
+    async def reject(e):
 
         nonlocal current_thread_id
         nonlocal current_intent
@@ -919,9 +932,19 @@ def agent_view(page):
         if not current_thread_id:
             return
 
+        username = await page.shared_preferences.get(
+            "username"
+        )
+
+        token = await page.shared_preferences.get(
+            "access_token"
+        )
+
         send_chat_decision(
             current_thread_id,
-            False
+            False,
+            username,
+            token
         )
 
         add_message(

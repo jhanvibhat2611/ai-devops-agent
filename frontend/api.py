@@ -4,6 +4,28 @@ import requests
 
 BASE_URL = "http://127.0.0.1:8000"
 
+def get_headers(token=None):
+
+    headers = {}
+
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    return headers
+
+def login_user(username, password):
+
+    response = requests.post(
+        f"{BASE_URL}/login",
+        json={
+            "username": username,
+            "password": password
+        }
+    )
+
+    return response.json()
+
+
 def get_home():
     response = requests.get(f"{BASE_URL}/")
     return response.json()
@@ -125,7 +147,7 @@ def search_merge_requests(query):
 
     return response.json()
 
-def start_chat(message, thread_id=None):
+def start_chat(message, thread_id=None, token=None):
 
     payload = {
         "message": message
@@ -136,7 +158,8 @@ def start_chat(message, thread_id=None):
 
     response = requests.post(
         f"{BASE_URL}/chat",
-        json=payload
+        json=payload,
+        headers=get_headers(token)
     )
 
     print("========== CHAT RESPONSE ==========")
@@ -156,15 +179,31 @@ def start_chat(message, thread_id=None):
             )
         }
 
-def send_chat_decision(thread_id, approved):
+def send_chat_decision(
+    thread_id,
+    approved,
+    username,
+    token=None
+):
 
     response = requests.post(
         f"{BASE_URL}/chat/decision",
         json={
             "thread_id": thread_id,
-            "approved": approved
-        }
+            "approved": approved,
+            "username": username
+        },
+        headers=get_headers(token)
     )
 
-    return response.json()
+    print("\n========== CHAT DECISION RESPONSE ==========")
+    print("STATUS:", response.status_code)
+    print("TEXT:", response.text)
+    print("============================================\n")
 
+    response.raise_for_status()
+
+    if response.text.strip():
+        return response.json()
+
+    return {}

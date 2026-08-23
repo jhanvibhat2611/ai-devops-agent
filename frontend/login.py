@@ -1,11 +1,17 @@
 import flet as ft
+
 from register import show_register
-from storage import user_exists, verify_user
+from api import login_user
 from chat import show_chat
+
 
 def show_login(page: ft.Page):
 
-    username = ft.TextField(label="Username", width=300)
+    username = ft.TextField(
+        label="Username",
+        width=300
+    )
+
     password = ft.TextField(
         label="Password",
         password=True,
@@ -13,21 +19,41 @@ def show_login(page: ft.Page):
         width=300,
     )
 
-    def login(e):
+    # This will display errors directly below the password field
+    error_text = ft.Text(
+        "",
+        color="red",
+        size=14
+    )
 
-        if not user_exists(username.value):
-            show_register(page)
-            return
+    async def login(e):
 
-        if not verify_user(username.value, password.value):
-            page.snack_bar = ft.SnackBar(
-                ft.Text("Incorrect Password!")
+        # Clear old error
+        error_text.value = ""
+        page.update()
+
+        result = login_user(
+            username.value,
+            password.value
+        )
+
+        # Login failed
+        if "access_token" not in result:
+
+            error_text.value = result.get(
+                "detail",
+                "Login failed."
             )
 
-            page.snack_bar.open = True
             page.update()
+
             return
 
+        # Save JWT token
+        page.auth_token = result["access_token"]
+        page.username = result["username"]
+
+        # Go to chat
         show_chat(page)
 
     page.clean()
@@ -40,10 +66,17 @@ def show_login(page: ft.Page):
                     size=28,
                     weight=ft.FontWeight.BOLD,
                 ),
-                ft.Text("Login", size=18),
+
+                ft.Text(
+                    "Login",
+                    size=18
+                ),
 
                 username,
+
                 password,
+
+                error_text,
 
                 ft.ElevatedButton(
                     "Login",
