@@ -111,7 +111,7 @@ def agent_view(page):
         response = start_chat(
             message,
             current_thread_id,
-            token
+            token=page.auth_token
         )
 
         # --------------------------------------------------------
@@ -866,6 +866,10 @@ def agent_view(page):
     # APPROVE WORKFLOW
     # ============================================================
 
+    # ============================================================
+    # APPROVE WORKFLOW
+    # ============================================================
+
     async def approve(e):
 
         nonlocal current_thread_id
@@ -882,16 +886,16 @@ def agent_view(page):
             "access_token"
         )
 
+        print("TOKEN FROM STORAGE:", token)
+
         response = send_chat_decision(
             current_thread_id,
             True,
             username,
-            token
+            token=token
         )
 
-        mr_url = response.get(
-            "mr_url"
-        )
+        mr_url = response.get("mr_url")
 
         if mr_url:
 
@@ -911,9 +915,7 @@ def agent_view(page):
                 "could not be created."
             )
 
-        add_message(
-            message
-        )
+        add_message(message)
 
         current_thread_id = None
         current_intent = None
@@ -944,7 +946,7 @@ def agent_view(page):
             current_thread_id,
             False,
             username,
-            token
+            token=token
         )
 
         add_message(

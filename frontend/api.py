@@ -196,10 +196,14 @@ def send_chat_decision(
         headers=get_headers(token)
     )
 
-    print("\n========== CHAT DECISION RESPONSE ==========")
+    print(
+        "\n========== CHAT DECISION RESPONSE =========="
+    )
     print("STATUS:", response.status_code)
     print("TEXT:", response.text)
-    print("============================================\n")
+    print(
+        "============================================\n"
+    )
 
     response.raise_for_status()
 

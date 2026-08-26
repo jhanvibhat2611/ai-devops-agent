@@ -391,7 +391,10 @@ def unit_test_agent(state: WorkflowState):
 
     print("\n========== UNIT TEST AGENT ==========")
 
-    generated_code = state["generated_code"]
+    generated_code = state.get(
+        "generated_code",
+        ""
+    )
 
     if not generated_code.strip():
 
@@ -488,7 +491,7 @@ def unit_test_agent(state: WorkflowState):
             )
 
         # --------------------------------------------------------
-        # Check that at least one pytest test exists
+        # Check at least one test exists
         # --------------------------------------------------------
 
         test_functions = [
@@ -501,10 +504,11 @@ def unit_test_agent(state: WorkflowState):
                     ast.AsyncFunctionDef
                 )
             )
-               and node.name.startswith("test_")
+            and node.name.startswith("test_")
         ]
 
         if not test_functions:
+
             return False, (
                 "Qwen did not generate any pytest "
                 "test functions."
@@ -524,19 +528,20 @@ def unit_test_agent(state: WorkflowState):
                     ast.AsyncFunctionDef
                 )
             )
-               and node.name in source_function_names
-               and not node.name.startswith("test_")
+            and node.name in source_function_names
+            and not node.name.startswith("test_")
         ]
 
         if copied_functions:
+
             return False, (
                 "Qwen recreated source functions instead "
-                f"of testing them: {', '.join(copied_functions)}"
+                f"of testing them: "
+                f"{', '.join(copied_functions)}"
             )
 
         # --------------------------------------------------------
-        # Reject Hypothesis / property-based testing
-        # We want simple deterministic pytest tests
+        # Reject Hypothesis
         # --------------------------------------------------------
 
         for node in ast.walk(tree):
@@ -546,32 +551,38 @@ def unit_test_agent(state: WorkflowState):
                 for alias in node.names:
 
                     if (
-                            alias.name == "hypothesis"
-                            or alias.name.startswith("hypothesis.")
+                        alias.name == "hypothesis"
+                        or alias.name.startswith(
+                            "hypothesis."
+                        )
                     ):
+
                         return False, (
                             "Generated tests use Hypothesis. "
-                            "Use simple direct pytest assertions instead."
+                            "Use simple direct pytest "
+                            "assertions instead."
                         )
 
             elif isinstance(node, ast.ImportFrom):
 
                 if (
-                        node.module == "hypothesis"
-                        or (
+                    node.module == "hypothesis"
+                    or (
                         node.module
                         and node.module.startswith(
-                    "hypothesis."
-                )
-                )
+                            "hypothesis."
+                        )
+                    )
                 ):
+
                     return False, (
                         "Generated tests use Hypothesis. "
-                        "Use simple direct pytest assertions instead."
+                        "Use simple direct pytest "
+                        "assertions instead."
                     )
 
         # --------------------------------------------------------
-        # Reject tests that mock the implementation being tested
+        # Reject mocking the implementation itself
         # --------------------------------------------------------
 
         for node in ast.walk(tree):
@@ -579,14 +590,17 @@ def unit_test_agent(state: WorkflowState):
             if isinstance(node, ast.Call):
 
                 if (
-                        isinstance(node.func, ast.Name)
-                        and node.func.id == "patch"
-                        and node.args
+                    isinstance(
+                        node.func,
+                        ast.Name
+                    )
+                    and node.func.id == "patch"
+                    and node.args
                 ):
 
                     if isinstance(
-                            node.args[0],
-                            ast.Constant
+                        node.args[0],
+                        ast.Constant
                     ):
 
                         patch_target = str(
@@ -594,23 +608,26 @@ def unit_test_agent(state: WorkflowState):
                         )
 
                         for function_name in (
-                                source_function_names
+                            source_function_names
                         ):
 
                             if patch_target.endswith(
-                                    f".{function_name}"
+                                f".{function_name}"
                             ):
+
                                 return False, (
-                                    "Generated tests mock the "
-                                    "actual function being tested: "
+                                    "Generated tests mock "
+                                    "the actual function "
+                                    "being tested: "
                                     f"{function_name}"
                                 )
 
         # --------------------------------------------------------
-        # Reject excessive number of tests
+        # Limit number of tests
         # --------------------------------------------------------
 
         if len(test_functions) > 5:
+
             return False, (
                 "Generated more than 5 tests. "
                 "Keep tests simple and between 1 and 5."
@@ -619,200 +636,245 @@ def unit_test_agent(state: WorkflowState):
         return True, ""
 
     # ============================================================
-    # GENERATE TESTS
+    # RUN TESTS
+    # ============================================================
+
+    def run_tests(
+        generated_code,
+        test_code
+    ):
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+
+            source_file = os.path.join(
+                temp_dir,
+                "generated_feature.py"
+            )
+
+            test_file = os.path.join(
+                temp_dir,
+                "test_generated_feature.py"
+            )
+
+            # ----------------------------------------------------
+            # Write source
+            # ----------------------------------------------------
+
+            with open(
+                source_file,
+                "w",
+                encoding="utf-8"
+            ) as file:
+
+                file.write(
+                    generated_code.rstrip()
+                    + "\n"
+                )
+
+            # ----------------------------------------------------
+            # Write tests
+            # ----------------------------------------------------
+
+            with open(
+                test_file,
+                "w",
+                encoding="utf-8"
+            ) as file:
+
+                file.write(
+                    test_code.rstrip()
+                    + "\n"
+                )
+
+            print(
+                "\n🧪 Running pytest..."
+            )
+
+            print(
+                "Python interpreter:",
+                sys.executable
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    test_file,
+                    "-v"
+                ],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True
+            )
+
+            test_output = (
+                result.stdout
+                + "\n"
+                + result.stderr
+            ).strip()
+
+            return (
+                result.returncode,
+                test_output
+            )
+
+    # ============================================================
+    # INITIAL TEST GENERATION PROMPT
     # ============================================================
 
     prompt = f"""
-    You are a careful senior Python test engineer.
+You are a careful senior Python test engineer.
 
-    Generate pytest unit tests for the EXACT Python source code below.
+Generate pytest unit tests for the EXACT Python source code below.
 
-    ============================================================
-    SOURCE CODE
-    ============================================================
+============================================================
+SOURCE CODE
+============================================================
 
-    {generated_code}
+{generated_code}
 
-    ============================================================
-    YOUR JOB
-    ============================================================
+============================================================
+YOUR JOB
+============================================================
 
-    The source code already exists in:
+The implementation already exists in:
 
-    generated_feature.py
+generated_feature.py
 
-    Write ONLY the test file:
+Write tests that import and test the EXISTING implementation.
 
-    test_generated_feature.py
+DO NOT rewrite, modify, replace, or reimplement the source code.
 
-    You must import and test the existing implementation.
+============================================================
+MOST IMPORTANT RULE: DO NOT INVENT EXPECTED OUTPUTS
+============================================================
 
-    ============================================================
-    CRITICAL DEPENDENCY RULE
-    ============================================================
+Every expected value in every assertion MUST be correct.
 
-    Use ONLY:
+Before writing an assertion:
 
-    - pytest
-    - Python standard library
-    - dependencies explicitly imported by the source code
+1. Carefully trace the actual implementation.
+2. Determine exactly what output the implementation produces.
+3. Use that exact output in the assertion.
 
-    DO NOT use or import:
+If the source code clearly reverses a string using:
 
-    - hypothesis
-    - unittest.mock unless an actual external dependency must be mocked
-    - property-based testing libraries
-    - any additional third-party testing libraries
+input_string[::-1]
 
-    For simple Python functions, use normal pytest tests with
-    direct function calls and direct assertions.
+then calculate the expected result exactly.
 
-    ============================================================
-    MOST IMPORTANT RULE
-    ============================================================
+For example:
 
-    DO NOT INVENT REQUIREMENTS.
+reverse_string("hello") == "olleh"
 
-    Every assertion must be directly supported by the source code
-    or by the obvious intended behavior of that exact code.
+and:
 
-    Do NOT expect:
+reverse_string("  spaces  ") == "  secaps  "
 
-    - errors not raised by the source code
-    - unsupported exceptions
-    - type conversions
-    - string conversions
-    - validation that does not exist
-    - API routes that do not exist
-    - features that do not exist
-    - behavior not present in the implementation
+Do NOT make up expected strings, numbers, or outputs.
 
-    ============================================================
-    TEST ONLY REAL BEHAVIOR
-    ============================================================
+============================================================
+DO NOT INVENT REQUIREMENTS
+============================================================
 
-    1. Import the implementation from generated_feature.py.
+Test ONLY behavior directly supported by the exact source code.
 
-    2. Test the actual implementation.
+Do NOT expect:
 
-    3. Do NOT redefine source functions or classes.
+- errors not raised by the implementation
+- unsupported exceptions
+- type conversions not present
+- validation not present
+- API routes that do not exist
+- features that do not exist
+- imaginary requirements
 
-    4. Do NOT copy source code into the tests.
+============================================================
+TEST RULES
+============================================================
 
-    5. Do NOT create fake alternative implementations.
+1. Import from generated_feature.py.
 
-    6. Do NOT invent unsupported edge cases.
+2. Test the real implementation.
 
-    7. Do NOT mock the function or class being tested.
+3. Do NOT redefine source functions or classes.
 
-    8. Only mock genuine external dependencies when necessary.
+4. Do NOT copy the implementation into the tests.
 
-    9. Keep the tests SIMPLE and RELEVANT.
+5. Do NOT create an alternative implementation.
 
-    10. Prefer normal direct assertions.
+6. Do NOT mock the function or class being tested.
 
-    11. Generate between 1 and 5 meaningful tests.
+7. Use fixed deterministic inputs.
 
-    12. Every test function name must start with:
+8. Generate between 1 and 5 meaningful tests.
 
-    test_
+9. Every test function must start with:
 
-    ============================================================
-    NORMAL PYTHON FUNCTIONS
-    ============================================================
+test_
 
-    For a simple deterministic function, use direct assertions.
+10. Prefer simple direct assertions.
 
-    Example:
+============================================================
+DEPENDENCY RULES
+============================================================
 
-    from generated_feature import add
+Use ONLY:
 
-    def test_add_positive_numbers():
-        assert add(2, 3) == 5
+- pytest
+- Python standard library
+- dependencies already required by the source code
 
-    def test_add_negative_numbers():
-        assert add(-2, -3) == -5
+DO NOT use:
 
-    Do NOT use:
+- hypothesis
+- @given
+- hypothesis.strategies
+- property-based testing
+- random generated inputs
+- unnecessary mocks
+- additional third-party testing libraries
 
-    - hypothesis
-    - @given
-    - strategies
-    - random generated inputs
-    - mocks
+============================================================
+SIMPLE FUNCTION EXAMPLE
+============================================================
 
-    unless the source code genuinely requires external dependencies
-    to be mocked.
+from generated_feature import add
 
-    ============================================================
-    FLOAT RULE
-    ============================================================
+def test_add_positive_numbers():
+    assert add(2, 3) == 5
 
-    For normal float inputs, use reasonable fixed values.
+def test_add_negative_numbers():
+    assert add(-2, -3) == -5
 
-    GOOD:
+============================================================
+SIDE EFFECTS
+============================================================
 
-    assert square(2.5) == 6.25
+Only mock genuine external dependencies when the source code
+actually requires them, such as:
 
-    DO NOT generate:
+- network requests
+- databases
+- subprocess calls
+- external APIs
 
-    - nan
-    - infinity
-    - extremely large floating-point values
-    - random floating-point values
+Do NOT mock the actual implementation being tested.
 
-    unless the source code explicitly handles those cases.
+============================================================
+OUTPUT
+============================================================
 
-    ============================================================
-    FASTAPI CODE
-    ============================================================
+Return ONLY valid executable Python pytest code.
 
-    If the source contains:
-
-    app = FastAPI()
-
-    use:
-
-    from generated_feature import app
-    from fastapi.testclient import TestClient
-
-    client = TestClient(app)
-
-    Then test only the actual routes defined in the source.
-
-    ============================================================
-    SIDE EFFECTS
-    ============================================================
-
-    Only mock something when the source code actually depends on
-    an external side effect such as:
-
-    - network requests
-    - databases
-    - subprocess calls
-    - os.system
-    - input()
-    - external APIs
-
-    Do NOT mock the actual function or class being tested.
-
-    ============================================================
-    OUTPUT
-    ============================================================
-
-    Return ONLY valid executable Python pytest code.
-
-    NO explanations.
-    NO Markdown.
-    NO code fences.
-
-    The code will be saved directly as:
-
-    test_generated_feature.py
-    """
+NO explanations.
+NO Markdown.
+NO code fences.
+"""
 
     # ============================================================
-    # GENERATE TEST CODE
+    # GENERATE INITIAL TESTS
     # ============================================================
 
     print(
@@ -834,10 +896,11 @@ def unit_test_agent(state: WorkflowState):
     )
 
     # ============================================================
-    # RETRY IF TEST CODE IS INVALID
+    # RETRY ON INVALID TEST STRUCTURE
     # ============================================================
 
     if not valid_tests:
+
         print(
             "\n⚠️ Generated tests rejected:"
         )
@@ -846,74 +909,54 @@ def unit_test_agent(state: WorkflowState):
             validation_message
         )
 
+        retry_prompt = f"""
+The previous pytest test generation was rejected.
+
+REJECTION REASON:
+
+{validation_message}
+
+Generate a corrected pytest test file for this exact source code.
+
+============================================================
+SOURCE CODE
+============================================================
+
+{generated_code}
+
+============================================================
+STRICT RULES
+============================================================
+
+- Import and test the real implementation from generated_feature.py.
+- Do not redefine source functions.
+- Do not copy the implementation.
+- Do not mock the implementation.
+- Do not invent behavior.
+- Use only fixed deterministic inputs.
+- Generate between 1 and 5 tests.
+- Every test function must start with test_.
+- Use pytest and Python standard library only unless the source
+  already requires another dependency.
+- Do not use hypothesis.
+- Do not use property-based testing.
+- Do not use random inputs.
+
+MOST IMPORTANT:
+
+Every expected assertion value must be calculated correctly
+from the actual implementation.
+
+Return ONLY executable Python code.
+
+NO explanations.
+NO Markdown.
+NO code fences.
+"""
+
         print(
             "\n🔄 Regenerating tests..."
         )
-
-        retry_prompt = f"""
-    The previous test generation was rejected.
-
-    Reason:
-
-    {validation_message}
-
-    Generate a new pytest test file for the exact source code below.
-
-    ============================================================
-    SOURCE CODE
-    ============================================================
-
-    {generated_code}
-
-    ============================================================
-    STRICT RULES
-    ============================================================
-
-    The implementation already exists in:
-
-    generated_feature.py
-
-    Import and test the real implementation.
-
-    Use ONLY:
-
-    - pytest
-    - Python standard library
-    - dependencies already required by the source code
-
-    NEVER use:
-
-    - hypothesis
-    - @given
-    - hypothesis.strategies
-    - property-based testing
-    - random generated inputs
-    - unnecessary mocks
-    - additional third-party testing libraries
-
-    For simple functions, use fixed inputs and direct assertions.
-
-    DO NOT:
-
-    - redefine source functions
-    - copy the source implementation
-    - mock the function being tested
-    - invent behavior
-    - expect unsupported exceptions
-    - test features that do not exist
-    - generate nan or infinity
-    - generate extremely large numeric values
-
-    Only test behavior directly supported by the source code.
-
-    Generate between 1 and 5 meaningful pytest tests.
-
-    Return ONLY valid executable Python code.
-
-    NO Markdown.
-    NO explanations.
-    NO code fences.
-    """
 
         response = llm1.invoke(
             retry_prompt
@@ -929,22 +972,8 @@ def unit_test_agent(state: WorkflowState):
             )
         )
 
-        retry_response = llm1.invoke(
-            retry_prompt
-        )
-
-        test_code = clean_test_code(
-            retry_response.content
-        )
-
-        valid_tests, validation_message = (
-            validate_test_code(
-                test_code
-            )
-        )
-
     # ============================================================
-    # STOP IF TEST GENERATION STILL FAILED
+    # STOP IF STRUCTURE IS STILL INVALID
     # ============================================================
 
     if not valid_tests:
@@ -991,116 +1020,208 @@ def unit_test_agent(state: WorkflowState):
     )
 
     # ============================================================
-    # CREATE TEMPORARY TEST ENVIRONMENT
+    # RUN INITIAL TESTS
     # ============================================================
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+    return_code, test_output = run_tests(
+        generated_code,
+        test_code
+    )
 
-        source_file = os.path.join(
-            temp_dir,
-            "generated_feature.py"
-        )
+    print(
+        "\n========== TEST RESULT =========="
+    )
 
-        test_file = os.path.join(
-            temp_dir,
-            "test_generated_feature.py"
-        )
+    print(
+        test_output
+    )
 
-        # --------------------------------------------------------
-        # Write source code
-        # --------------------------------------------------------
+    print(
+        "================================="
+    )
 
-        with open(
-            source_file,
-            "w",
-            encoding="utf-8"
-        ) as file:
+    # ============================================================
+    # IF TESTS PASS
+    # ============================================================
 
-            file.write(
-                generated_code
-            )
-
-        # --------------------------------------------------------
-        # Write generated tests
-        # --------------------------------------------------------
-
-        with open(
-            test_file,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            file.write(
-                test_code
-            )
-
-        # ========================================================
-        # RUN PYTEST
-        # ========================================================
+    if return_code == 0:
 
         print(
-            "\n🧪 Running pytest..."
-        )
-
-        print(
-            "Python interpreter:",
-            sys.executable
-        )
-
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                test_file,
-                "-v"
-            ],
-            cwd=temp_dir,
-            capture_output=True,
-            text=True
-        )
-
-        test_output = (
-            result.stdout
-            + "\n"
-            + result.stderr
-        ).strip()
-
-        print(
-            "\n========== TEST RESULT =========="
-        )
-
-        print(
-            test_output
-        )
-
-        print(
-            "================================="
-        )
-
-        # ========================================================
-        # TEST RESULT
-        # ========================================================
-
-        if result.returncode == 0:
-
-            print(
-                "✅ All generated tests passed."
-            )
-
-            return {
-                "test_result": test_output,
-                "test_passed": True
-            }
-
-        print(
-            "❌ Generated tests failed."
+            "✅ All generated tests passed."
         )
 
         return {
             "test_result": test_output,
+            "test_passed": True
+        }
+
+    # ============================================================
+    # TESTS FAILED — ASK QWEN TO FIX THE TESTS
+    # ============================================================
+
+    print(
+        "\n⚠️ Generated tests failed."
+    )
+
+    print(
+        "🔄 Asking Qwen to correct the tests..."
+    )
+
+    correction_prompt = f"""
+You generated pytest tests for the source code below.
+
+The tests FAILED.
+
+Your job is to FIX THE TESTS.
+
+IMPORTANT:
+
+Assume the SOURCE CODE is the implementation being tested.
+
+Do NOT modify, replace, or reimplement the source code.
+
+Instead, inspect the pytest failure output and determine whether
+the test has an incorrect expectation.
+
+============================================================
+SOURCE CODE
+============================================================
+
+{generated_code}
+
+============================================================
+CURRENT TEST CODE
+============================================================
+
+{test_code}
+
+============================================================
+PYTEST FAILURE OUTPUT
+============================================================
+
+{test_output}
+
+============================================================
+CORRECTION RULES
+============================================================
+
+1. Keep testing the real implementation.
+
+2. Do NOT redefine or modify source functions.
+
+3. Carefully calculate every expected value from the actual
+   implementation.
+
+4. If an assertion expected value is wrong, correct the TEST.
+
+5. Do NOT change tests merely to hide a real implementation error.
+
+6. Do NOT invent new requirements.
+
+7. Do NOT add behavior that does not exist.
+
+8. Use fixed deterministic inputs.
+
+9. Generate between 1 and 5 tests.
+
+10. Do not use Hypothesis, random inputs, or unnecessary mocks.
+
+============================================================
+OUTPUT
+============================================================
+
+Return ONLY the corrected executable pytest code.
+
+NO explanations.
+NO Markdown.
+NO code fences.
+"""
+
+    response = llm1.invoke(
+        correction_prompt
+    )
+
+    corrected_test_code = clean_test_code(
+        response.content
+    )
+
+    valid_tests, validation_message = (
+        validate_test_code(
+            corrected_test_code
+        )
+    )
+
+    if not valid_tests:
+
+        print(
+            "\n❌ Corrected tests were invalid:"
+        )
+
+        print(
+            validation_message
+        )
+
+        return {
+            "test_result": validation_message,
             "test_passed": False
         }
+
+    # ============================================================
+    # SHOW CORRECTED TESTS
+    # ============================================================
+
+    print(
+        "\n========== CORRECTED TESTS =========="
+    )
+
+    print(
+        corrected_test_code
+    )
+
+    print(
+        "====================================="
+    )
+
+    # ============================================================
+    # RUN CORRECTED TESTS
+    # ============================================================
+
+    return_code, corrected_test_output = run_tests(
+        generated_code,
+        corrected_test_code
+    )
+
+    print(
+        "\n========== CORRECTED TEST RESULT =========="
+    )
+
+    print(
+        corrected_test_output
+    )
+
+    print(
+        "==========================================="
+    )
+
+    if return_code == 0:
+
+        print(
+            "✅ Corrected generated tests passed."
+        )
+
+        return {
+            "test_result": corrected_test_output,
+            "test_passed": True
+        }
+
+    print(
+        "❌ Generated tests still failed after correction."
+    )
+
+    return {
+        "test_result": corrected_test_output,
+        "test_passed": False
+    }
 def security_agent(state: WorkflowState):
 
     import ast

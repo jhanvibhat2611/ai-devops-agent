@@ -28,8 +28,8 @@ sys.path.append(
 )
 from datetime import datetime, timedelta, timezone
 import jwt
-from fastapi import HTTPException
-
+from fastapi import HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from storage.auth import (
     verify_user,
@@ -47,15 +47,67 @@ import base64
 from urllib.parse import quote
 chat_sessions = {}
 # created a FastAPI application
+load_dotenv()
+
 app = FastAPI()
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "super-secret-key")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = 24
 
-# Load environment variables from .env
-load_dotenv()
+security = HTTPBearer()
 
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+
+    token = credentials.credentials
+
+    print("\n========== JWT DEBUG ==========")
+    print("Received token:", token)
+    print("JWT_SECRET_KEY:", JWT_SECRET_KEY)
+    print("JWT_ALGORITHM:", JWT_ALGORITHM)
+    print("================================\n")
+
+    try:
+
+        payload = jwt.decode(
+            token,
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM]
+        )
+
+        print("Decoded payload:", payload)
+
+        username = payload.get("sub")
+
+        if username is None:
+
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication token"
+            )
+
+        return username
+
+    except jwt.ExpiredSignatureError:
+
+        print("JWT ERROR: Token expired")
+
+        raise HTTPException(
+            status_code=401,
+            detail="Token has expired"
+        )
+
+    except jwt.InvalidTokenError as e:
+
+        print("JWT ERROR:", str(e))
+
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token"
+        )
 # Read values from .env
 TOKEN = os.getenv("GITLAB_TOKEN")
 PROJECT_ID = os.getenv("GITLAB_PROJECT_ID")
@@ -85,7 +137,7 @@ class ChatRequest(BaseModel):
 class ChatDecisionRequest(BaseModel):
     thread_id: str
     approved: bool
-    username: str
+
 
 class SuggestionRequest(BaseModel):
     file: str
@@ -1602,7 +1654,10 @@ async def chat(request: ChatRequest):
         "result": result
     }
 @app.post("/chat/decision")
-async def chat_decision(request: ChatDecisionRequest):
+async def chat_decision(
+    request: ChatDecisionRequest,
+    username: str = Depends(get_current_user)
+):
 
     config = {
         "configurable": {
@@ -1611,12 +1666,7 @@ async def chat_decision(request: ChatDecisionRequest):
     }
 
     result = graph.invoke(
-        Command(
-            update={
-                "username": request.username
-            },
-            resume=request.approved
-        ),
+        Command(resume=request.approved),
         config=config
     )
 
@@ -2126,6 +2176,11 @@ async def login_user(user: LoginRequest):
         JWT_SECRET_KEY,
         algorithm=JWT_ALGORITHM
     )
+
+    print("\n========== LOGIN JWT DEBUG ==========")
+    print("JWT_SECRET_KEY:", JWT_SECRET_KEY)
+    print("Generated token:", token)
+    print("=====================================\n")
 
     return {
         "access_token": token,

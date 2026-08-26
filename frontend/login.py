@@ -19,7 +19,6 @@ def show_login(page: ft.Page):
         width=300,
     )
 
-    # This will display errors directly below the password field
     error_text = ft.Text(
         "",
         color="red",
@@ -46,12 +45,32 @@ def show_login(page: ft.Page):
             )
 
             page.update()
-
             return
 
-        # Save JWT token
-        page.auth_token = result["access_token"]
-        page.username = result["username"]
+        # Get fresh JWT token
+        token = result["access_token"]
+        user = result["username"]
+
+        # Save in current page/session
+        page.auth_token = token
+        page.username = user
+
+        # Save persistently so other views can access it
+        await page.shared_preferences.set(
+            "access_token",
+            token
+        )
+
+        await page.shared_preferences.set(
+            "username",
+            user
+        )
+
+        # Debug
+        print("\n========== LOGIN JWT ==========")
+        print("NEW TOKEN:", token)
+        print("USERNAME:", user)
+        print("================================\n")
 
         # Go to chat
         show_chat(page)
