@@ -1,122 +1,300 @@
 # 🤖 AI DevOps Agent
 
-An AI-powered DevOps assistant that automates the journey from a natural-language development request to a GitLab Merge Request.
+> **Built during my AI/Software Engineering Internship at Enfec Technologies.**
 
-Built as an **Internship Project at Enfec Technologies**, the application combines LLM-powered agents, LangGraph workflows, GitLab integration, Elasticsearch, automated testing, and JWT authentication into a single developer workflow.
+An AI-powered DevOps agent that transforms natural language software requirements into tested code and GitLab Merge Requests through a human-in-the-loop workflow.
 
----
-
-## 🚀 What It Does
-
-Instead of manually creating a branch, writing code, testing it, committing changes, pushing to GitLab, and opening a Merge Request, a developer can simply describe what they want to build.
-
-For example:
-
-> Create a Python function that adds two numbers and handles integers and decimals.
-
-The AI DevOps Agent then:
-
-1. Understands the requirement using an LLM.
-2. Generates a suitable branch name, commit message, and Merge Request title.
-3. Searches previous Merge Requests using Elasticsearch for relevant context.
-4. Generates the required code.
-5. Automatically generates unit tests.
-6. Executes the generated tests using `pytest`.
-7. Presents the generated workflow to the user for approval.
-8. Creates a Git branch.
-9. Commits and pushes the generated code.
-10. Creates a GitLab Merge Request.
-
-The user remains in control through a **human-in-the-loop approval step** before repository changes are made.
+Built using **FastAPI, LangGraph, Qwen, Elasticsearch, GitLab API, JWT Authentication, and Flet**.
 
 ---
 
-# ✨ Features
+## 🚀 What it does
 
-### 🧠 AI-Powered Requirement Analysis
+The user gives the agent a requirement such as:
 
-The agent accepts natural-language development requests and extracts:
+> Create a Python function that checks whether a number is prime.
 
-- Requirement analysis
-- Suggested branch name
-- Commit message
-- Merge Request title
+The agent then:
 
----
+1. 🔍 Searches Elasticsearch for relevant Merge Request context
+2. 🧠 Analyzes the requirement using an LLM
+3. 🌿 Generates a branch name, commit message, and Merge Request title
+4. 💻 Generates the implementation
+5. 🧪 Generates and executes unit tests using `pytest`
+6. 👤 Pauses for human approval
+7. 🚀 Creates a Git branch and commits the generated code
+8. 📤 Pushes the changes to GitLab
+9. 🔀 Creates a Merge Request
 
-### 🔎 Elasticsearch-Powered Context Retrieval
-
-Previous Merge Requests are indexed in Elasticsearch.
-
-Before generating a new implementation, the agent searches for relevant historical Merge Requests and uses them as additional context.
-
-This enables the system to reuse information from previous development activity.
-
----
-
-### 💻 AI Code Generation
-
-The agent generates implementation code based on the user's request and the retrieved repository context.
+The project also supports **AI-powered Merge Request reviews and code suggestions**.
 
 ---
 
-### 🧪 Automated Unit Test Generation
-
-For generated code, the system automatically:
-
-- Generates unit tests using an LLM
-- Executes tests using `pytest`
-- Captures test output
-- Detects failing test cases
-
-The workflow can attempt to correct generated tests when failures occur.
-
----
-
-### 👤 Human-in-the-Loop Approval
-
-Before making changes to the Git repository, the workflow pauses and asks the user for approval.
-
-The user can:
-
-- ✅ Approve the workflow
-- ❌ Reject the workflow
-
-Repository changes are only performed after approval.
-
----
-
-### 🌳 Automated Git Workflow
-
-After approval, the agent can:
-
-1. Create a new branch
-2. Write the generated code to the repository
-3. Commit the changes
-4. Push the branch to GitLab
-5. Create a Merge Request
-
----
-
-### 🔐 JWT Authentication
-
-The application includes JWT-based authentication.
-
-The workflow is:
+## 🔄 Agent Workflow
 
 ```text
-User Login
-    ↓
-Backend verifies credentials
-    ↓
-JWT token generated
-    ↓
-Token stored by frontend
-    ↓
-Protected API requests include:
+                         ┌──────────────────────┐
+                         │   User Requirement   │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                    ┌──────────────────────────────┐
+                    │ Search Similar Merge Requests │
+                    │       (Elasticsearch)         │
+                    └──────────────┬───────────────┘
+                                   │
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │    Analyze Requirement       │
+                    │        using Qwen            │
+                    └──────────────┬───────────────┘
+                                   │
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │        Generate Code         │
+                    └──────────────┬───────────────┘
+                                   │
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │     Generate Unit Tests      │
+                    └──────────────┬───────────────┘
+                                   │
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │       Execute pytest         │
+                    └──────────────┬───────────────┘
+                                   │
+                                   ▼
+                         ┌──────────────────┐
+                         │ Human Approval?  │
+                         └────────┬─────────┘
+                                  │
+                     ┌────────────┴────────────┐
+                     │                         │
+                     ▼                         ▼
+                ❌ Reject                  ✅ Approve
+                     │                         │
+                     ▼                         ▼
+                    End                 Create Branch
+                                              │
+                                              ▼
+                                         Commit Code
+                                              │
+                                              ▼
+                                         Push to GitLab
+                                              │
+                                              ▼
+                                      Create Merge Request
+```
 
-Authorization: Bearer <token>
-    ↓
-Backend validates JWT
-    ↓
-Authenticated request is processed
+---
+
+## ✨ Key Features
+
+### 🧠 AI Requirement Analysis
+Converts natural language requirements into structured development tasks, including:
+
+- Requirement analysis
+- Branch name generation
+- Commit message generation
+- Merge Request title generation
+
+### 🔎 Context Retrieval with Elasticsearch
+Stores and searches Merge Request metadata to retrieve relevant context before generating a solution.
+
+### 💻 AI Code Generation
+Generates implementation code based on the user's requirement and retrieved context.
+
+### 🧪 Automated Unit Testing
+Generates unit tests and executes them using `pytest` before proceeding with the workflow.
+
+### 👤 Human-in-the-Loop Workflow
+Uses **LangGraph interrupts and resume functionality** to pause the workflow and require explicit user approval before repository changes are made.
+
+### 🌿 Git & GitLab Automation
+After approval, the agent can automatically:
+
+- Create a branch
+- Write generated code
+- Commit changes
+- Push to GitLab
+- Create a Merge Request
+
+### 🔐 JWT Authentication
+Implements JWT-based authentication and protects sensitive workflow actions.
+
+### 🔍 AI Merge Request Review
+Analyzes Merge Request diffs and generates AI-powered code review feedback.
+
+### 💡 AI Code Suggestions
+Generates improvement suggestions for Merge Request code and supports accepting AI-generated suggestions.
+
+---
+
+## 🏗️ Architecture
+
+```text
+┌──────────────┐
+│    Flet UI   │
+└──────┬───────┘
+       │ HTTP + JWT
+       ▼
+┌──────────────────────┐
+│   FastAPI Backend    │
+└──────────┬───────────┘
+           │
+    ┌──────┼───────────────┐
+    │      │               │
+    ▼      ▼               ▼
+┌────────┐ ┌─────────────┐ ┌──────────────┐
+│LangGraph│ │Elasticsearch│ │  GitLab API  │
+│Workflow │ │   Context   │ │ Repository   │
+└────┬────┘ └─────────────┘ └──────────────┘
+     │
+     ▼
+┌──────────────┐
+│   Qwen LLM   │
+│              │
+│ • Analysis   │
+│ • Code       │
+│ • Tests      │
+│ • Review     │
+└──────────────┘
+```
+
+---
+
+## 🛠️ Tech Stack
+
+| Category | Technologies |
+|---|---|
+| Backend | Python, FastAPI |
+| AI / Agent Workflow | Qwen, LangGraph |
+| Search & Context | Elasticsearch |
+| Authentication | JWT |
+| Testing | Pytest |
+| Git Integration | Git, GitLab API |
+| Frontend | Flet |
+
+---
+
+## 📂 Project Structure
+
+```text
+ai-devops-agent/
+│
+├── backend/
+│   ├── main.py
+│   ├── workflow/
+│   │   ├── graph.py
+│   │   └── nodes.py
+│   ├── storage/
+│   │   ├── auth.py
+│   │   └── database.py
+│   ├── elasticsearch_client.py
+│   └── ai_review.py
+│
+├── frontend/
+│   ├── main.py
+│   ├── api.py
+│   └── views/
+│
+└── README.md
+```
+
+---
+
+## ⚙️ Running Locally
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/<your-username>/ai-devops-agent.git
+cd ai-devops-agent
+```
+
+### 2. Create and activate a virtual environment
+
+```bash
+python -m venv venv
+```
+
+**Windows**
+
+```bash
+venv\Scripts\activate
+```
+
+**Linux/macOS**
+
+```bash
+source venv/bin/activate
+```
+
+### 3. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Configure environment variables
+
+Create a `.env` file and configure the required credentials:
+
+```env
+JWT_SECRET_KEY=your_secret_key
+JWT_ALGORITHM=HS256
+JWT_EXPIRE_HOURS=24
+
+GITLAB_TOKEN=your_gitlab_token
+PROJECT_ID=your_gitlab_project_id
+```
+
+Also configure the required LLM and Elasticsearch settings.
+
+> **Never commit `.env` files, API keys, JWT secrets, or GitLab tokens to GitHub.**
+
+### 5. Start the backend
+
+```bash
+cd backend
+uvicorn main:app --reload
+```
+
+### 6. Start the frontend
+
+```bash
+cd frontend
+python main.py
+```
+
+---
+
+## 🎯 Project Motivation
+
+This project explores how AI agents can automate repetitive parts of the software development lifecycle while keeping developers in control.
+
+The core workflow follows a **human-in-the-loop approach**:
+
+```text
+AI analyzes → AI generates → AI tests → Human approves → Automation executes
+```
+
+---
+
+## 🚧 Future Improvements
+
+- User-specific GitLab authentication
+- Multi-repository support and repository selection
+- OAuth-based GitLab integration
+- Improved validation and correction of AI-generated tests
+- Dockerization
+- CI/CD pipeline
+- Background job processing
+
+---
+
+## 👩‍💻 Author
+
+**Jhanvi Bhat**
+
