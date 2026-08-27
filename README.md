@@ -1,6 +1,6 @@
 # 🤖 AI DevOps Agent
 
-> **Built during my AI/Software Engineering Internship at Enfec Technologies.**
+> **Built during my AI Internship at Enfec Technologies.**
 
 An AI-powered DevOps agent that transforms natural language software requirements into tested code and GitLab Merge Requests through a human-in-the-loop workflow.
 
