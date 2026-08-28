@@ -36,8 +36,9 @@ from storage.auth import (
     get_user,
     get_gitlab_token
 )
-from storage.database import (
-    save_merge_request_approval
+from storage.approval_history import (
+    save_merge_request_approval,
+    get_merge_request_approvals
 )
 from pydantic import BaseModel
 from langgraph.types import Command
@@ -2186,4 +2187,22 @@ async def login_user(user: LoginRequest):
         "access_token": token,
         "token_type": "bearer",
         "username": user.username
+    }
+
+# ============================================================
+# GET MERGE REQUEST APPROVAL HISTORY
+# ============================================================
+
+@app.get("/merge-request/{mr_iid}/approval-history")
+async def get_approval_history(
+    mr_iid: int
+):
+
+    approvals = get_merge_request_approvals(
+        mr_iid
+    )
+
+    return {
+        "mr_iid": mr_iid,
+        "approvals": approvals
     }

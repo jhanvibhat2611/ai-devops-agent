@@ -211,3 +211,11 @@ def send_chat_decision(
         return response.json()
 
     return {}
+
+def get_merge_request_approval_history(mr_id):
+
+    response = requests.get(
+        f"{BASE_URL}/merge-request/{mr_id}/approval-history"
+    )
+
+    return response.json()

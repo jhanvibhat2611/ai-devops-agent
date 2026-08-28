@@ -9,7 +9,7 @@ from langgraph.types import interrupt
 from workflow.state import WorkflowState
 from elasticsearch_client import search_merge_requests
 
-from storage.database import (
+from storage.approval_history import (
     save_merge_request_approval
 )
 

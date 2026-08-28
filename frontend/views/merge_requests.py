@@ -4,6 +4,7 @@ from api import (
     get_merge_requests,
     create_merge_request,
     get_merge_request,
+    get_merge_request_approval_history,
 )
 
 
@@ -101,6 +102,10 @@ def merge_requests_view(page: ft.Page):
 
         else:
 
+            # ====================================================
+            # MERGE REQUEST DETAILS
+            # ====================================================
+
             output.controls.append(
                 ft.Card(
                     content=ft.Container(
@@ -112,14 +117,89 @@ def merge_requests_view(page: ft.Page):
                                     weight=ft.FontWeight.BOLD,
                                     size=18,
                                 ),
-                                ft.Text(f"Title: {mr['title']}"),
-                                ft.Text(f"State: {mr['state']}"),
-                                ft.Text(f"Description: {mr['description']}"),
+
+                                ft.Text(
+                                    f"Title: {mr['title']}"
+                                ),
+
+                                ft.Text(
+                                    f"State: {mr['state']}"
+                                ),
+
+                                ft.Text(
+                                    f"Description: {mr['description']}"
+                                ),
                             ]
                         ),
                     )
                 )
             )
+
+            # ====================================================
+            # APPROVAL HISTORY
+            # ====================================================
+
+            output.controls.append(
+                ft.Text(
+                    "Approval History",
+                    size=20,
+                    weight=ft.FontWeight.BOLD,
+                )
+            )
+
+            approval_history = (
+                get_merge_request_approval_history(
+                    mr["iid"]
+                )
+            )
+
+            approvals = approval_history.get(
+                "approvals",
+                []
+            )
+
+            if approvals:
+
+                for approval in approvals:
+
+                    status = approval["status"]
+
+                    if status == "approved":
+                        status_text = "✅ Approved"
+                    else:
+                        status_text = "❌ Rejected"
+
+                    output.controls.append(
+                        ft.Card(
+                            content=ft.Container(
+                                padding=10,
+                                content=ft.Column(
+                                    [
+                                        ft.Text(
+                                            status_text,
+                                            weight=ft.FontWeight.BOLD,
+                                        ),
+
+                                        ft.Text(
+                                            f"User: {approval['username']}"
+                                        ),
+
+                                        ft.Text(
+                                            f"Time: {approval['approved_at']}"
+                                        ),
+                                    ]
+                                ),
+                            )
+                        )
+                    )
+
+            else:
+
+                output.controls.append(
+                    ft.Text(
+                        "No approval history found."
+                    )
+                )
 
         page.update()
 

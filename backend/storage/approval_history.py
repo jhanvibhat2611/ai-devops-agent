@@ -46,27 +46,45 @@ def save_merge_request_approval(
 
     connection = get_connection()
 
-    cursor = connection.cursor()
+    try:
 
-    cursor.execute(
-        """
-        INSERT INTO merge_request_approvals (
-            mr_iid,
-            username,
-            status
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            INSERT INTO merge_request_approvals (
+                mr_iid,
+                username,
+                status
+            )
+            VALUES (?, ?, ?)
+            """,
+            (
+                mr_iid,
+                username,
+                status
+            )
         )
-        VALUES (?, ?, ?)
-        """,
-        (
-            mr_iid,
-            username,
-            status
+
+        connection.commit()
+
+        print(
+            f"✅ Approval history saved for MR !{mr_iid}"
         )
-    )
 
-    connection.commit()
+    except Exception as error:
 
-    connection.close()
+        connection.rollback()
+
+        print(
+            f"❌ Failed to save approval history: {error}"
+        )
+
+        raise
+
+    finally:
+
+        connection.close()
 
 
 # ============================================================
@@ -79,34 +97,38 @@ def get_merge_request_approvals(
 
     connection = get_connection()
 
-    cursor = connection.cursor()
+    try:
 
-    cursor.execute(
-        """
-        SELECT
-            mr_iid,
-            username,
-            status,
-            approved_at
-        FROM merge_request_approvals
-        WHERE mr_iid = ?
-        ORDER BY approved_at DESC
-        """,
-        (
-            mr_iid,
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            SELECT
+                mr_iid,
+                username,
+                status,
+                approved_at
+            FROM merge_request_approvals
+            WHERE mr_iid = ?
+            ORDER BY approved_at DESC
+            """,
+            (
+                mr_iid,
+            )
         )
-    )
 
-    approvals = cursor.fetchall()
+        approvals = cursor.fetchall()
 
-    connection.close()
+        return [
+            {
+                "mr_iid": approval[0],
+                "username": approval[1],
+                "status": approval[2],
+                "approved_at": approval[3]
+            }
+            for approval in approvals
+        ]
 
-    return [
-        {
-            "mr_iid": approval[0],
-            "username": approval[1],
-            "status": approval[2],
-            "approved_at": approval[3]
-        }
-        for approval in approvals
-    ]
+    finally:
+
+        connection.close()
