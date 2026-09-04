@@ -5,7 +5,8 @@ from api import (
     send_chat_decision,
     post_ai_review,
     post_ai_suggestion,
-    accept_ai_suggestion
+    accept_ai_suggestion,
+    get_branches
 )
 
 
@@ -29,6 +30,8 @@ def agent_view(page):
 
     current_thread_id = None
     current_intent = None
+    selected_branch_field = None
+    existing_branch_dropdown = None
 
     # ============================================================
     # RESET AGENT STATE
@@ -38,9 +41,14 @@ def agent_view(page):
 
         nonlocal current_thread_id
         nonlocal current_intent
+        nonlocal selected_branch_field
+        nonlocal existing_branch_dropdown
 
         current_thread_id = None
         current_intent = None
+
+        selected_branch_field = None
+        existing_branch_dropdown = None
 
         messages.controls.clear()
         input_box.value = ""
@@ -517,9 +525,145 @@ def agent_view(page):
         # LANGGRAPH HUMAN APPROVAL
         # ========================================================
 
+        # ========================================================
+        # LANGGRAPH HUMAN APPROVAL
+        # ========================================================
+
         if response.get(
-            "status"
+                "status"
         ) == "waiting_for_approval":
+
+            nonlocal selected_branch_field
+            nonlocal existing_branch_dropdown
+
+            current_thread_id = (
+                response["thread_id"]
+            )
+
+            suggested_branch = response.get(
+                "branch_name",
+                ""
+            )
+
+            proposal = (
+                "AI DevOps Agent:\n\n"
+                f"Analysis:\n"
+                f"{response['analysis']}\n\n"
+                f"Suggested Branch:\n"
+                f"{suggested_branch}\n\n"
+                f"Commit:\n"
+                f"{response['commit_message']}\n\n"
+                f"MR Title:\n"
+                f"{response['mr_title']}\n\n"
+                f"Generated Code:\n"
+                f"{response.get(
+                    'generated_code',
+                    'No generated code available.'
+                )}"
+            )
+
+            add_message(
+                proposal
+            )
+
+            # ====================================================
+            # CUSTOM / NEW BRANCH NAME
+            # ====================================================
+
+            selected_branch_field = ft.TextField(
+                label="New / Custom Branch Name",
+                value=suggested_branch,
+                width=420
+            )
+
+            # ====================================================
+            # FETCH EXISTING BRANCHES
+            # ====================================================
+
+            branches_response = get_branches()
+
+            branch_options = []
+
+            if isinstance(
+                    branches_response,
+                    list
+            ):
+
+                for branch in branches_response:
+
+                    branch_name = branch.get(
+                        "name"
+                    )
+
+                    if branch_name:
+                        branch_options.append(
+                            ft.dropdown.Option(
+                                branch_name
+                            )
+                        )
+
+            # ====================================================
+            # EXISTING BRANCH DROPDOWN
+            # ====================================================
+
+            existing_branch_dropdown = ft.Dropdown(
+                label="Use Existing Branch Instead",
+                hint_text="Select an existing branch",
+                width=420,
+                options=branch_options
+            )
+
+            branch_selection_ui = ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            "Branch Selection",
+                            size=18,
+                            weight=ft.FontWeight.BOLD
+                        ),
+
+                        ft.Text(
+                            "You can either create a new branch "
+                            "using the field below, or select an "
+                            "existing branch. Selecting an existing "
+                            "branch takes priority."
+                        ),
+
+                        selected_branch_field,
+
+                        existing_branch_dropdown,
+                    ],
+                    spacing=12
+                ),
+                padding=15,
+                border_radius=10,
+                bgcolor=ft.Colors.GREY_100
+            )
+
+            messages.controls.append(
+                branch_selection_ui
+            )
+
+            approval_buttons = ft.Row(
+                [
+                    ft.ElevatedButton(
+                        "Approve",
+                        on_click=approve
+                    ),
+
+                    ft.OutlinedButton(
+                        "Reject",
+                        on_click=reject
+                    )
+                ]
+            )
+
+            messages.controls.append(
+                approval_buttons
+            )
+
+            page.update()
+            return
 
             current_thread_id = (
                 response["thread_id"]
@@ -874,6 +1018,8 @@ def agent_view(page):
 
         nonlocal current_thread_id
         nonlocal current_intent
+        nonlocal selected_branch_field
+        nonlocal existing_branch_dropdown
 
         if not current_thread_id:
             return
@@ -886,22 +1032,96 @@ def agent_view(page):
             "access_token"
         )
 
-        print("TOKEN FROM STORAGE:", token)
+        # ========================================================
+        # DETERMINE WHICH BRANCH THE USER CHOSE
+        # ========================================================
 
-        response = send_chat_decision(
-            current_thread_id,
-            True,
-            username,
-            token=token
+        existing_branch = None
+
+        if existing_branch_dropdown:
+            existing_branch = (
+                existing_branch_dropdown.value
+            )
+
+        # --------------------------------------------------------
+        # Existing branch selected
+        # --------------------------------------------------------
+
+        if existing_branch:
+
+            final_branch_name = (
+                existing_branch
+            )
+
+            use_existing_branch = True
+
+        # --------------------------------------------------------
+        # Otherwise create/use custom branch name
+        # --------------------------------------------------------
+
+        else:
+
+            final_branch_name = ""
+
+            if selected_branch_field:
+                final_branch_name = (
+                        selected_branch_field.value
+                        or ""
+                ).strip()
+
+            if not final_branch_name:
+                add_message(
+                    "AI DevOps Agent:\n\n"
+                    "❌ Please enter a branch name "
+                    "or select an existing branch."
+                )
+
+                page.update()
+                return
+
+            use_existing_branch = False
+
+        print(
+            "\n========== BRANCH SELECTION =========="
         )
 
-        mr_url = response.get("mr_url")
+        print(
+            "Branch:",
+            final_branch_name
+        )
+
+        print(
+            "Existing:",
+            use_existing_branch
+        )
+
+        print(
+            "======================================\n"
+        )
+
+        # ========================================================
+        # RESUME WORKFLOW
+        # ========================================================
+
+        response = send_chat_decision(
+            thread_id=current_thread_id,
+            approved=True,
+            username=username,
+            token=token,
+            branch_name=final_branch_name,
+            use_existing_branch=use_existing_branch
+        )
+
+        mr_url = response.get(
+            "mr_url"
+        )
 
         if mr_url:
 
             message = (
                 "AI DevOps Agent:\n\n"
                 "✅ Workflow approved.\n\n"
+                f"Branch: {final_branch_name}\n\n"
                 f"Merge Request created:\n"
                 f"{mr_url}"
             )
@@ -915,10 +1135,15 @@ def agent_view(page):
                 "could not be created."
             )
 
-        add_message(message)
+        add_message(
+            message
+        )
 
         current_thread_id = None
         current_intent = None
+
+        selected_branch_field = None
+        existing_branch_dropdown = None
 
         page.update()
 

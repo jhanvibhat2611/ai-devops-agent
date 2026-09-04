@@ -21,6 +21,7 @@ class WorkflowState(TypedDict):
     security_passed: bool
 
     branch_name: str
+    use_existing_branch: bool
     commit_message: str
     mr_title: str
 

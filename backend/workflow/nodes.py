@@ -397,11 +397,8 @@ def unit_test_agent(state: WorkflowState):
     )
 
     if not generated_code.strip():
-
         return {
-            "test_result": (
-                "No generated code available for testing."
-            ),
+            "test_result": "No generated code available for testing.",
             "test_passed": False
         }
 
@@ -410,7 +407,6 @@ def unit_test_agent(state: WorkflowState):
     # ============================================================
 
     try:
-
         source_tree = ast.parse(
             generated_code
         )
@@ -428,7 +424,6 @@ def unit_test_agent(state: WorkflowState):
         }
 
     except SyntaxError as error:
-
         return {
             "test_result": (
                 f"Generated source code is invalid Python: {error}"
@@ -442,6 +437,9 @@ def unit_test_agent(state: WorkflowState):
 
     def clean_test_code(code):
 
+        if not code:
+            return ""
+
         code = code.strip()
 
         fenced_match = re.search(
@@ -451,7 +449,6 @@ def unit_test_agent(state: WorkflowState):
         )
 
         if fenced_match:
-
             return fenced_match.group(1).strip()
 
         lines = code.splitlines()
@@ -460,19 +457,79 @@ def unit_test_agent(state: WorkflowState):
             lines
             and lines[0].strip().startswith("```")
         ):
-
             lines = lines[1:]
 
         if (
             lines
             and lines[-1].strip() == "```"
         ):
-
             lines = lines[:-1]
 
-        return "\n".join(
-            lines
-        ).strip()
+        return "\n".join(lines).strip()
+
+    # ============================================================
+    # PRESERVE IMPORTS
+    # ============================================================
+
+    def preserve_original_imports(
+        original_test_code,
+        corrected_test_code
+    ):
+
+        try:
+            original_tree = ast.parse(
+                original_test_code
+            )
+
+            corrected_tree = ast.parse(
+                corrected_test_code
+            )
+
+        except SyntaxError:
+            return corrected_test_code
+
+        original_imports = []
+        corrected_imports = set()
+
+        for node in corrected_tree.body:
+
+            if isinstance(
+                node,
+                (
+                    ast.Import,
+                    ast.ImportFrom
+                )
+            ):
+                corrected_imports.add(
+                    ast.unparse(node)
+                )
+
+        for node in original_tree.body:
+
+            if isinstance(
+                node,
+                (
+                    ast.Import,
+                    ast.ImportFrom
+                )
+            ):
+                import_text = ast.unparse(
+                    node
+                )
+
+                if import_text not in corrected_imports:
+                    original_imports.append(
+                        import_text
+                    )
+
+        if not original_imports:
+            return corrected_test_code
+
+        return (
+            "\n".join(original_imports)
+            + "\n\n"
+            + corrected_test_code.strip()
+        )
 
     # ============================================================
     # VALIDATE TEST STRUCTURE
@@ -480,19 +537,18 @@ def unit_test_agent(state: WorkflowState):
 
     def validate_test_code(code):
 
-        try:
+        if not code.strip():
+            return False, "Generated test code is empty."
 
-            tree = ast.parse(code)
+        try:
+            tree = ast.parse(
+                code
+            )
 
         except SyntaxError as error:
-
             return False, (
                 f"Generated tests contain invalid Python: {error}"
             )
-
-        # --------------------------------------------------------
-        # Check at least one test exists
-        # --------------------------------------------------------
 
         test_functions = [
             node.name
@@ -504,18 +560,23 @@ def unit_test_agent(state: WorkflowState):
                     ast.AsyncFunctionDef
                 )
             )
-            and node.name.startswith("test_")
+            and node.name.startswith(
+                "test_"
+            )
         ]
 
         if not test_functions:
-
             return False, (
-                "Qwen did not generate any pytest "
-                "test functions."
+                "Qwen did not generate any pytest test functions."
+            )
+
+        if len(test_functions) > 5:
+            return False, (
+                "Generated more than 5 test functions."
             )
 
         # --------------------------------------------------------
-        # Prevent recreation of source functions
+        # Prevent recreating source functions
         # --------------------------------------------------------
 
         copied_functions = [
@@ -529,14 +590,14 @@ def unit_test_agent(state: WorkflowState):
                 )
             )
             and node.name in source_function_names
-            and not node.name.startswith("test_")
+            and not node.name.startswith(
+                "test_"
+            )
         ]
 
         if copied_functions:
-
             return False, (
-                "Qwen recreated source functions instead "
-                f"of testing them: "
+                "Qwen recreated source functions instead of testing them: "
                 f"{', '.join(copied_functions)}"
             )
 
@@ -546,7 +607,10 @@ def unit_test_agent(state: WorkflowState):
 
         for node in ast.walk(tree):
 
-            if isinstance(node, ast.Import):
+            if isinstance(
+                node,
+                ast.Import
+            ):
 
                 for alias in node.names:
 
@@ -556,14 +620,14 @@ def unit_test_agent(state: WorkflowState):
                             "hypothesis."
                         )
                     ):
-
                         return False, (
-                            "Generated tests use Hypothesis. "
-                            "Use simple direct pytest "
-                            "assertions instead."
+                            "Generated tests use Hypothesis."
                         )
 
-            elif isinstance(node, ast.ImportFrom):
+            elif isinstance(
+                node,
+                ast.ImportFrom
+            ):
 
                 if (
                     node.module == "hypothesis"
@@ -574,73 +638,76 @@ def unit_test_agent(state: WorkflowState):
                         )
                     )
                 ):
-
                     return False, (
-                        "Generated tests use Hypothesis. "
-                        "Use simple direct pytest "
-                        "assertions instead."
+                        "Generated tests use Hypothesis."
                     )
 
         # --------------------------------------------------------
-        # Reject mocking the implementation itself
+        # Reject mocking implementation under test
         # --------------------------------------------------------
 
         for node in ast.walk(tree):
 
-            if isinstance(node, ast.Call):
+            if not isinstance(
+                node,
+                ast.Call
+            ):
+                continue
 
-                if (
-                    isinstance(
-                        node.func,
-                        ast.Name
-                    )
-                    and node.func.id == "patch"
-                    and node.args
-                ):
+            patch_target = None
 
-                    if isinstance(
-                        node.args[0],
-                        ast.Constant
+            if (
+                isinstance(
+                    node.func,
+                    ast.Name
+                )
+                and node.func.id == "patch"
+                and node.args
+                and isinstance(
+                    node.args[0],
+                    ast.Constant
+                )
+            ):
+                patch_target = str(
+                    node.args[0].value
+                )
+
+            elif (
+                isinstance(
+                    node.func,
+                    ast.Attribute
+                )
+                and node.func.attr == "patch"
+                and node.args
+                and isinstance(
+                    node.args[0],
+                    ast.Constant
+                )
+            ):
+                patch_target = str(
+                    node.args[0].value
+                )
+
+            if patch_target:
+
+                for function_name in source_function_names:
+
+                    if patch_target.endswith(
+                        f".{function_name}"
                     ):
-
-                        patch_target = str(
-                            node.args[0].value
+                        return False, (
+                            "Generated tests mock the implementation "
+                            f"being tested: {function_name}"
                         )
-
-                        for function_name in (
-                            source_function_names
-                        ):
-
-                            if patch_target.endswith(
-                                f".{function_name}"
-                            ):
-
-                                return False, (
-                                    "Generated tests mock "
-                                    "the actual function "
-                                    "being tested: "
-                                    f"{function_name}"
-                                )
-
-        # --------------------------------------------------------
-        # Limit number of tests
-        # --------------------------------------------------------
-
-        if len(test_functions) > 5:
-
-            return False, (
-                "Generated more than 5 tests. "
-                "Keep tests simple and between 1 and 5."
-            )
 
         return True, ""
 
     # ============================================================
-    # RUN TESTS
+    # RUN PYTEST
     # ============================================================
 
     def run_tests(
-        generated_code,
+        source_code,
         test_code
     ):
 
@@ -656,31 +723,21 @@ def unit_test_agent(state: WorkflowState):
                 "test_generated_feature.py"
             )
 
-            # ----------------------------------------------------
-            # Write source
-            # ----------------------------------------------------
-
             with open(
                 source_file,
                 "w",
                 encoding="utf-8"
             ) as file:
-
                 file.write(
-                    generated_code.rstrip()
+                    source_code.rstrip()
                     + "\n"
                 )
-
-            # ----------------------------------------------------
-            # Write tests
-            # ----------------------------------------------------
 
             with open(
                 test_file,
                 "w",
                 encoding="utf-8"
             ) as file:
-
                 file.write(
                     test_code.rstrip()
                     + "\n"
@@ -726,7 +783,8 @@ def unit_test_agent(state: WorkflowState):
     prompt = f"""
 You are a careful senior Python test engineer.
 
-Generate pytest unit tests for the EXACT Python source code below.
+Generate a COMPLETE pytest test file for the exact Python source
+code below.
 
 ============================================================
 SOURCE CODE
@@ -735,138 +793,148 @@ SOURCE CODE
 {generated_code}
 
 ============================================================
-YOUR JOB
+IMPORTANT
 ============================================================
 
 The implementation already exists in:
 
 generated_feature.py
 
-Write tests that import and test the EXISTING implementation.
+Your job is ONLY to test the existing implementation.
 
-DO NOT rewrite, modify, replace, or reimplement the source code.
+Do NOT:
 
-============================================================
-MOST IMPORTANT RULE: DO NOT INVENT EXPECTED OUTPUTS
-============================================================
-
-Every expected value in every assertion MUST be correct.
-
-Before writing an assertion:
-
-1. Carefully trace the actual implementation.
-2. Determine exactly what output the implementation produces.
-3. Use that exact output in the assertion.
-
-If the source code clearly reverses a string using:
-
-input_string[::-1]
-
-then calculate the expected result exactly.
-
-For example:
-
-reverse_string("hello") == "olleh"
-
-and:
-
-reverse_string("  spaces  ") == "  secaps  "
-
-Do NOT make up expected strings, numbers, or outputs.
+- rewrite the implementation
+- redefine implementation functions
+- copy implementation code into tests
+- invent requirements
+- invent validation
+- invent exceptions
+- invent unsupported behavior
+- mock the implementation being tested
 
 ============================================================
-DO NOT INVENT REQUIREMENTS
+VALID INPUT DOMAIN
 ============================================================
 
-Test ONLY behavior directly supported by the exact source code.
+Test behavior inside the valid input domain implied by the source
+and requirement.
 
-Do NOT expect:
+If a function is intended to receive a NON-EMPTY list, do NOT
+invent behavior for an empty list unless the implementation
+explicitly defines it.
 
-- errors not raised by the implementation
-- unsupported exceptions
-- type conversions not present
-- validation not present
-- API routes that do not exist
-- features that do not exist
-- imaginary requirements
+Do NOT expect exceptions simply because an out-of-domain input
+exists.
 
 ============================================================
-TEST RULES
+EXPECTED VALUES
 ============================================================
 
-1. Import from generated_feature.py.
+Every expected result must be correct.
 
-2. Test the real implementation.
+Before writing every assertion:
 
-3. Do NOT redefine source functions or classes.
+1. Trace the implementation carefully.
+2. Calculate the expected output.
+3. Verify arithmetic.
+4. Prefer small and easily checked values.
 
-4. Do NOT copy the implementation into the tests.
-
-5. Do NOT create an alternative implementation.
-
-6. Do NOT mock the function or class being tested.
-
-7. Use fixed deterministic inputs.
-
-8. Generate between 1 and 5 meaningful tests.
-
-9. Every test function must start with:
-
-test_
-
-10. Prefer simple direct assertions.
+Do NOT guess expected outputs.
 
 ============================================================
-DEPENDENCY RULES
+EXPECTED VALUE ORACLES
+============================================================
+
+When the expected result can be safely expressed using a simple,
+independent Python standard-library expression, prefer that instead
+of manually hardcoding arithmetic.
+
+Examples:
+
+For a range calculation:
+
+expected = max(numbers) - min(numbers)
+
+For a sum:
+
+expected = sum(numbers)
+
+For a count:
+
+expected = len([...])
+
+For string reversal:
+
+expected = value[::-1]
+
+Only use such reference expressions when they directly represent
+the stated behavior and do NOT simply call the function under test.
+
+============================================================
+TEST STRUCTURE
+============================================================
+
+- Import from generated_feature.py.
+- Generate between 1 and 5 test functions.
+- Every test function must start with test_.
+- Prefer ONE logical case per test function.
+- Prefer one primary assertion per test.
+- Use deterministic fixed inputs.
+- Keep tests simple and readable.
+
+============================================================
+DEPENDENCIES
 ============================================================
 
 Use ONLY:
 
 - pytest
 - Python standard library
-- dependencies already required by the source code
+- dependencies already used by the source code
 
-DO NOT use:
+Do NOT use:
 
 - hypothesis
 - @given
 - hypothesis.strategies
+- random inputs
 - property-based testing
-- random generated inputs
 - unnecessary mocks
-- additional third-party testing libraries
+- extra third-party test libraries
 
 ============================================================
-SIMPLE FUNCTION EXAMPLE
+FLOATS
 ============================================================
 
-from generated_feature import add
+Use normal finite values.
 
-def test_add_positive_numbers():
-    assert add(2, 3) == 5
+Do NOT use:
 
-def test_add_negative_numbers():
-    assert add(-2, -3) == -5
+- NaN
+- infinity
+- extremely large floating-point values
+
+unless explicitly required.
 
 ============================================================
 SIDE EFFECTS
 ============================================================
 
-Only mock genuine external dependencies when the source code
-actually requires them, such as:
+Only mock genuine external dependencies such as:
 
-- network requests
+- HTTP requests
 - databases
 - subprocess calls
 - external APIs
 
-Do NOT mock the actual implementation being tested.
+Never mock the function being tested.
 
 ============================================================
 OUTPUT
 ============================================================
 
-Return ONLY valid executable Python pytest code.
+Return ONLY the COMPLETE executable pytest file.
 
 NO explanations.
 NO Markdown.
@@ -896,7 +964,7 @@ NO code fences.
     )
 
     # ============================================================
-    # RETRY ON INVALID TEST STRUCTURE
+    # ONE STRUCTURAL RETRY
     # ============================================================
 
     if not valid_tests:
@@ -910,13 +978,11 @@ NO code fences.
         )
 
         retry_prompt = f"""
-The previous pytest test generation was rejected.
+The previous pytest file was structurally invalid.
 
 REJECTION REASON:
 
 {validation_message}
-
-Generate a corrected pytest test file for this exact source code.
 
 ============================================================
 SOURCE CODE
@@ -925,27 +991,30 @@ SOURCE CODE
 {generated_code}
 
 ============================================================
-STRICT RULES
+YOUR TASK
 ============================================================
 
-- Import and test the real implementation from generated_feature.py.
+Generate a NEW COMPLETE pytest file.
+
+STRICT RULES:
+
+- Import from generated_feature.py.
+- Include all required imports.
+- Generate 1 to 5 test functions.
+- Every function must start with test_.
+- Prefer one logical case per test.
+- Use deterministic inputs.
+- Stay inside the valid input domain.
+- Do not use Hypothesis.
+- Do not use random values.
+- Do not mock the implementation.
 - Do not redefine source functions.
 - Do not copy the implementation.
-- Do not mock the implementation.
 - Do not invent behavior.
-- Use only fixed deterministic inputs.
-- Generate between 1 and 5 tests.
-- Every test function must start with test_.
-- Use pytest and Python standard library only unless the source
-  already requires another dependency.
-- Do not use hypothesis.
-- Do not use property-based testing.
-- Do not use random inputs.
-
-MOST IMPORTANT:
-
-Every expected assertion value must be calculated correctly
-from the actual implementation.
+- Do not invent exceptions.
+- Prefer simple Python reference expressions when they safely
+  represent the expected behavior.
+- Calculate every expected result carefully.
 
 Return ONLY executable Python code.
 
@@ -973,7 +1042,7 @@ NO code fences.
         )
 
     # ============================================================
-    # STOP IF STRUCTURE IS STILL INVALID
+    # STOP IF STRUCTURE STILL INVALID
     # ============================================================
 
     if not valid_tests:
@@ -984,18 +1053,6 @@ NO code fences.
 
         print(
             validation_message
-        )
-
-        print(
-            "\n========== INVALID TEST CODE =========="
-        )
-
-        print(
-            test_code
-        )
-
-        print(
-            "======================================="
         )
 
         return {
@@ -1020,7 +1077,7 @@ NO code fences.
     )
 
     # ============================================================
-    # RUN INITIAL TESTS
+    # INITIAL PYTEST RUN
     # ============================================================
 
     return_code, test_output = run_tests(
@@ -1041,7 +1098,7 @@ NO code fences.
     )
 
     # ============================================================
-    # IF TESTS PASS
+    # INITIAL PASS
     # ============================================================
 
     if return_code == 0:
@@ -1056,170 +1113,286 @@ NO code fences.
         }
 
     # ============================================================
-    # TESTS FAILED — ASK QWEN TO FIX THE TESTS
+    # BOUNDED REPAIR LOOP
     # ============================================================
 
     print(
         "\n⚠️ Generated tests failed."
     )
 
-    print(
-        "🔄 Asking Qwen to correct the tests..."
-    )
+    max_repair_attempts = 2
 
-    correction_prompt = f"""
-You generated pytest tests for the source code below.
+    current_test_code = test_code
+    current_test_output = test_output
 
-The tests FAILED.
+    for repair_attempt in range(
+        1,
+        max_repair_attempts + 1
+    ):
 
-Your job is to FIX THE TESTS.
+        print(
+            f"\n🔄 Test repair attempt "
+            f"{repair_attempt}/{max_repair_attempts}..."
+        )
 
-IMPORTANT:
-
-Assume the SOURCE CODE is the implementation being tested.
-
-Do NOT modify, replace, or reimplement the source code.
-
-Instead, inspect the pytest failure output and determine whether
-the test has an incorrect expectation.
+        correction_prompt = f"""
+You are a senior Python test engineer repairing an existing pytest
+test file.
 
 ============================================================
-SOURCE CODE
+SOURCE IMPLEMENTATION
 ============================================================
 
 {generated_code}
 
 ============================================================
-CURRENT TEST CODE
+CURRENT COMPLETE TEST FILE
 ============================================================
 
-{test_code}
+{current_test_code}
 
 ============================================================
 PYTEST FAILURE OUTPUT
 ============================================================
 
-{test_output}
+{current_test_output}
 
 ============================================================
-CORRECTION RULES
+YOUR TASK
 ============================================================
 
-1. Keep testing the real implementation.
+Repair the COMPLETE test file.
 
-2. Do NOT redefine or modify source functions.
+DO NOT modify the source implementation.
 
-3. Carefully calculate every expected value from the actual
-   implementation.
+Return the COMPLETE corrected pytest file, including:
 
-4. If an assertion expected value is wrong, correct the TEST.
+- all required imports
+- all valid passing tests
+- all corrected failing tests
 
-5. Do NOT change tests merely to hide a real implementation error.
+============================================================
+CHECK EVERY ASSERTION
+============================================================
 
-6. Do NOT invent new requirements.
+Do NOT inspect only the traceback.
 
-7. Do NOT add behavior that does not exist.
+Pytest may stop a test function at its first failing assertion.
 
-8. Use fixed deterministic inputs.
+Therefore:
 
-9. Generate between 1 and 5 tests.
+1. Re-check EVERY test function.
+2. Re-check EVERY assertion.
+3. Recalculate EVERY expected value.
+4. Preserve all correct tests.
+5. Correct all incorrect expectations you can identify.
 
-10. Do not use Hypothesis, random inputs, or unnecessary mocks.
+============================================================
+VALID INPUT DOMAIN
+============================================================
+
+Do not invent behavior for inputs outside the valid domain.
+
+If a function is intended for a NON-EMPTY list and the implementation
+does not define empty-list behavior, remove any test that invents an
+empty-list exception.
+
+Do NOT invent exceptions.
+
+============================================================
+EXPECTED VALUE ORACLES
+============================================================
+
+When a simple independent Python expression safely represents the
+expected result, use it instead of manually guessing arithmetic.
+
+Examples:
+
+Range:
+expected = max(numbers) - min(numbers)
+
+Sum:
+expected = sum(numbers)
+
+Count:
+expected = len([...])
+
+String reversal:
+expected = value[::-1]
+
+Do NOT use the function under test to calculate its own expected value.
+
+============================================================
+TEST VS IMPLEMENTATION FAILURE
+============================================================
+
+A failure can mean:
+
+1. The test is wrong.
+
+OR
+
+2. The implementation is genuinely wrong.
+
+Do NOT blindly change tests until they pass.
+
+If the test expectation is invalid, fix or remove it.
+
+If the implementation genuinely violates a valid test, preserve the
+test.
+
+============================================================
+STRICT RULES
+============================================================
+
+- Return the COMPLETE test file.
+- Preserve required imports.
+- Preserve valid tests.
+- Generate 1 to 5 test functions.
+- Every test function must start with test_.
+- Prefer one logical case per test.
+- Use deterministic inputs.
+- Do not use Hypothesis.
+- Do not use random inputs.
+- Do not use property-based testing.
+- Do not mock the implementation.
+- Do not redefine source functions.
+- Do not reproduce source implementation.
+- Do not invent requirements.
+- Do not invent exceptions.
 
 ============================================================
 OUTPUT
 ============================================================
 
-Return ONLY the corrected executable pytest code.
+Return ONLY the COMPLETE executable pytest file.
 
 NO explanations.
 NO Markdown.
 NO code fences.
 """
 
-    response = llm1.invoke(
-        correction_prompt
-    )
+        response = llm1.invoke(
+            correction_prompt
+        )
 
-    corrected_test_code = clean_test_code(
-        response.content
-    )
+        corrected_test_code = clean_test_code(
+            response.content
+        )
 
-    valid_tests, validation_message = (
-        validate_test_code(
+        # ========================================================
+        # RESTORE IMPORTS
+        # ========================================================
+
+        corrected_test_code = (
+            preserve_original_imports(
+                current_test_code,
+                corrected_test_code
+            )
+        )
+
+        # ========================================================
+        # VALIDATE REPAIRED TESTS
+        # ========================================================
+
+        valid_tests, validation_message = (
+            validate_test_code(
+                corrected_test_code
+            )
+        )
+
+        if not valid_tests:
+
+            print(
+                "\n❌ Repaired test file is invalid:"
+            )
+
+            print(
+                validation_message
+            )
+
+            return {
+                "test_result": validation_message,
+                "test_passed": False
+            }
+
+        # ========================================================
+        # SHOW REPAIRED TESTS
+        # ========================================================
+
+        print(
+            "\n========== REPAIRED TESTS =========="
+        )
+
+        print(
             corrected_test_code
         )
-    )
-
-    if not valid_tests:
 
         print(
-            "\n❌ Corrected tests were invalid:"
+            "===================================="
+        )
+
+        # ========================================================
+        # RUN REPAIRED TESTS
+        # ========================================================
+
+        return_code, corrected_test_output = (
+            run_tests(
+                generated_code,
+                corrected_test_code
+            )
         )
 
         print(
-            validation_message
+            "\n========== REPAIRED TEST RESULT =========="
         )
-
-        return {
-            "test_result": validation_message,
-            "test_passed": False
-        }
-
-    # ============================================================
-    # SHOW CORRECTED TESTS
-    # ============================================================
-
-    print(
-        "\n========== CORRECTED TESTS =========="
-    )
-
-    print(
-        corrected_test_code
-    )
-
-    print(
-        "====================================="
-    )
-
-    # ============================================================
-    # RUN CORRECTED TESTS
-    # ============================================================
-
-    return_code, corrected_test_output = run_tests(
-        generated_code,
-        corrected_test_code
-    )
-
-    print(
-        "\n========== CORRECTED TEST RESULT =========="
-    )
-
-    print(
-        corrected_test_output
-    )
-
-    print(
-        "==========================================="
-    )
-
-    if return_code == 0:
 
         print(
-            "✅ Corrected generated tests passed."
+            corrected_test_output
         )
 
-        return {
-            "test_result": corrected_test_output,
-            "test_passed": True
-        }
+        print(
+            "=========================================="
+        )
+
+        # ========================================================
+        # REPAIR SUCCESS
+        # ========================================================
+
+        if return_code == 0:
+
+            print(
+                "✅ Repaired generated tests passed."
+            )
+
+            return {
+                "test_result": corrected_test_output,
+                "test_passed": True
+            }
+
+        # ========================================================
+        # NEXT REPAIR ATTEMPT USES LATEST STATE
+        # ========================================================
+
+        current_test_code = (
+            corrected_test_code
+        )
+
+        current_test_output = (
+            corrected_test_output
+        )
+
+    # ============================================================
+    # ALL REPAIR ATTEMPTS FAILED
+    # ============================================================
 
     print(
-        "❌ Generated tests still failed after correction."
+        "\n❌ Tests still failed after "
+        f"{max_repair_attempts} repair attempts."
     )
 
     return {
-        "test_result": corrected_test_output,
+        "test_result": current_test_output,
         "test_passed": False
     }
 def security_agent(state: WorkflowState):
@@ -1635,7 +1808,7 @@ Rules:
 
 def unit_test_router(state: WorkflowState):
 
-    if state["test_passed"]:
+    if state.get("test_passed", False):
         return "passed"
 
     return "failed"
@@ -1651,28 +1824,80 @@ def security_router(state: WorkflowState):
 # ============================================================
 
 
-def create_branch(state: WorkflowState):
+def create_branch(
+    state: WorkflowState
+):
 
     from main import create_gitlab_branch
 
     branch_name = state["branch_name"]
 
-    print("\n========== CREATE BRANCH ==========")
-    print("Branch:", branch_name)
+    use_existing_branch = state.get(
+        "use_existing_branch",
+        False
+    )
+
+    print(
+        "\n========== CREATE / SELECT BRANCH =========="
+    )
+
+    print(
+        "Branch:",
+        branch_name
+    )
+
+    print(
+        "Use existing:",
+        use_existing_branch
+    )
+
+    # ========================================================
+    # USE EXISTING BRANCH
+    # ========================================================
+
+    if use_existing_branch:
+
+        print(
+            f"✅ Using existing branch: "
+            f"{branch_name}"
+        )
+
+        return {
+            "branch_name": branch_name,
+            "use_existing_branch": True
+        }
+
+    # ========================================================
+    # CREATE NEW BRANCH
+    # ========================================================
 
     result = create_gitlab_branch(
         branch_name=branch_name,
         ref="main"
     )
 
-    print("GitLab branch response:")
-    print(result)
+    print(
+        "GitLab branch response:"
+    )
+
+    print(
+        result
+    )
+
+    if (
+        isinstance(result, dict)
+        and "error" in result
+    ):
+
+        raise RuntimeError(
+            "Unable to create GitLab branch: "
+            f"{result.get('message', result)}"
+        )
 
     return {
-        "branch_name": branch_name
+        "branch_name": branch_name,
+        "use_existing_branch": False
     }
-
-
 # ============================================================
 # COMMIT GENERATED CODE LOCALLY
 # ============================================================

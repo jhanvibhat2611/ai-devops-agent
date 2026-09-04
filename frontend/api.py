@@ -183,16 +183,24 @@ def send_chat_decision(
     thread_id,
     approved,
     username,
-    token=None
+    token=None,
+    branch_name=None,
+    use_existing_branch=False
 ):
+
+    payload = {
+        "thread_id": thread_id,
+        "approved": approved,
+        "username": username,
+        "use_existing_branch": use_existing_branch
+    }
+
+    if branch_name:
+        payload["branch_name"] = branch_name
 
     response = requests.post(
         f"{BASE_URL}/chat/decision",
-        json={
-            "thread_id": thread_id,
-            "approved": approved,
-            "username": username
-        },
+        json=payload,
         headers=get_headers(token)
     )
 
@@ -211,7 +219,6 @@ def send_chat_decision(
         return response.json()
 
     return {}
-
 def get_merge_request_approval_history(mr_id):
 
     response = requests.get(

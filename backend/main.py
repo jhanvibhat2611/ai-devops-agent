@@ -138,6 +138,8 @@ class ChatRequest(BaseModel):
 class ChatDecisionRequest(BaseModel):
     thread_id: str
     approved: bool
+    branch_name: str | None = None
+    use_existing_branch: bool = False
 
 
 class SuggestionRequest(BaseModel):
@@ -1666,8 +1668,26 @@ async def chat_decision(
         }
     }
 
+    state_update = {}
+
+    if (
+        request.approved
+        and request.branch_name
+    ):
+
+        state_update["branch_name"] = (
+            request.branch_name
+        )
+
+        state_update["use_existing_branch"] = (
+            request.use_existing_branch
+        )
+
     result = graph.invoke(
-        Command(resume=request.approved),
+        Command(
+            update=state_update,
+            resume=request.approved
+        ),
         config=config
     )
 
@@ -1685,7 +1705,9 @@ async def chat_decision(
     return {
         "status": "rejected",
         "thread_id": request.thread_id,
-        "message": "Workflow rejected by user."
+        "message": (
+            "Workflow rejected by user."
+        )
     }
 @app.post("/webhook/gitlab")
 async def gitlab_webhook(payload: dict):
