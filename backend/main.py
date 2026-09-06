@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 import requests
+import sqlite3
 from dotenv import load_dotenv
 import os
 import json
@@ -34,7 +35,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from storage.auth import (
     verify_user,
     get_user,
-    get_gitlab_token
+    get_gitlab_token,
+    user_exists,
+    create_user
 )
 from storage.approval_history import (
     save_merge_request_approval,
@@ -123,6 +126,11 @@ class BranchRequest(BaseModel):
     branch_name: str
     ref: str
 
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    gitlab_token: str
+
 class MergeRequest(BaseModel):
     source_branch: str
     target_branch: str
@@ -134,6 +142,9 @@ class CommentRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     thread_id: str | None = None
+
+    project_id: int
+    default_branch: str | None = None
 
 class ChatDecisionRequest(BaseModel):
     thread_id: str
@@ -153,13 +164,33 @@ class LoginRequest(BaseModel):
     password: str
 
 #reusable gitlab function for get
-def make_gitlab_request(endpoint: str):
+def make_gitlab_request(
+    endpoint: str,
+    project_id=None,
+    gitlab_token=None
+):
 
-    url = f"https://gitlab.com/api/v4/projects/{PROJECT_ID}/{endpoint}"
+    effective_project_id = (
+        project_id
+        or PROJECT_ID
+    )
+
+    effective_token = (
+        gitlab_token
+        or TOKEN
+    )
+
+    url = (
+        "https://gitlab.com/api/v4/projects/"
+        f"{effective_project_id}/{endpoint}"
+    )
 
     response = requests.get(
         url,
-        headers=headers
+        headers={
+            "PRIVATE-TOKEN": effective_token
+        },
+        timeout=30
     )
 
     if response.status_code == 200:
@@ -169,8 +200,6 @@ def make_gitlab_request(endpoint: str):
         "error": response.status_code,
         "message": response.text
     }
-
-
 
 def get_file_content(file_path: str, branch: str):
 
@@ -476,24 +505,47 @@ def get_merge_request_changes(mr_iid: int):
     return make_gitlab_request(endpoint)
 
 #reusable gitlab function for post
-def make_gitlab_post_request(endpoint: str, payload: dict):
+def make_gitlab_post_request(
+    endpoint: str,
+    payload: dict,
+    project_id=None,
+    gitlab_token=None
+):
 
-    url = f"https://gitlab.com/api/v4/projects/{PROJECT_ID}/{endpoint}"
+    effective_project_id = (
+        project_id
+        or PROJECT_ID
+    )
+
+    effective_token = (
+        gitlab_token
+        or TOKEN
+    )
+
+    url = (
+        "https://gitlab.com/api/v4/projects/"
+        f"{effective_project_id}/{endpoint}"
+    )
 
     response = requests.post(
         url,
-        headers=headers,
-        data=payload
+        headers={
+            "PRIVATE-TOKEN": effective_token
+        },
+        data=payload,
+        timeout=30
     )
 
-    if response.status_code in [200, 201]:
+    if response.status_code in [
+        200,
+        201
+    ]:
         return response.json()
 
     return {
         "error": response.status_code,
         "message": response.text
     }
-
 # Home endpoint
 @app.get("/")
 async def home():
@@ -569,7 +621,12 @@ async def get_merge_requests():
 
     return merge_requests
 
-def create_gitlab_branch(branch_name: str, ref: str):
+def create_gitlab_branch(
+    branch_name: str,
+    ref: str,
+    project_id=None,
+    gitlab_token=None
+):
 
     payload = {
         "branch": branch_name,
@@ -578,8 +635,11 @@ def create_gitlab_branch(branch_name: str, ref: str):
 
     return make_gitlab_post_request(
         "repository/branches",
-        payload
+        payload,
+        project_id=project_id,
+        gitlab_token=gitlab_token
     )
+
 
 #post endpoint for creating branch
 @app.post("/create-branch")
@@ -590,7 +650,14 @@ async def create_branch(branch: BranchRequest):
         branch.ref
     )
 
-def create_gitlab_merge_request(source:str,target:str,title:str):
+def create_gitlab_merge_request(
+    source: str,
+    target: str,
+    title: str,
+    project_id=None,
+    gitlab_token=None
+):
+
     payload = {
         "source_branch": source,
         "target_branch": target,
@@ -599,7 +666,9 @@ def create_gitlab_merge_request(source:str,target:str,title:str):
 
     return make_gitlab_post_request(
         "merge_requests",
-        payload
+        payload,
+        project_id=project_id,
+        gitlab_token=gitlab_token
     )
 
 #merge request endpoint
@@ -958,9 +1027,32 @@ async def suggest_merge_request(mr_iid: int):
         "suggestions": suggestions
     }
 @app.post("/chat")
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    username: str = Depends(
+        get_current_user
+    )
+):
 
     message = request.message.strip()
+
+    project_id = (
+        request.project_id
+    )
+
+    default_branch = (
+            request.default_branch
+            or "main"
+    )
+
+    if not project_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No GitLab repository "
+                "was selected."
+            )
+        )
 
     if not message:
         return {
@@ -981,6 +1073,16 @@ async def chat(request: ChatRequest):
         thread_id,
         {}
     )
+
+    # ============================================================
+    # STORE USER + REPOSITORY CONTEXT IN SESSION
+    # ============================================================
+
+    session["username"] = username
+
+    session["gitlab_project_id"] = project_id
+
+    session["gitlab_default_branch"] = default_branch
 
     lower_message = message.lower()
 
@@ -1619,8 +1721,45 @@ async def chat(request: ChatRequest):
         }
     }
 
+    print(
+        "\n========== WORKFLOW CONTEXT =========="
+    )
+
+    print(
+        "User:",
+        username
+    )
+
+    print(
+        "Project ID:",
+        project_id
+    )
+
+    print(
+        "Default branch:",
+        default_branch
+    )
+
+    print(
+        "======================================\n"
+    )
+    print("\n========== WORKFLOW CONTEXT ==========")
+    print("User:", username)
+    print("Project ID:", project_id)
+    print("Default branch:", default_branch)
+    print("======================================\n")
     result = graph.invoke(
         {
+            "username": username,
+
+            "gitlab_project_id": (
+                project_id
+            ),
+
+            "gitlab_default_branch": (
+                default_branch
+            ),
+
             "user_request": message
         },
         config=config
@@ -2212,6 +2351,201 @@ async def login_user(user: LoginRequest):
     }
 
 # ============================================================
+# REGISTER USER
+# ============================================================
+
+@app.post("/register")
+async def register_user(
+    request: RegisterRequest
+):
+
+    username = (
+        request.username
+        or ""
+    ).strip()
+
+    password = (
+        request.password
+        or ""
+    )
+
+    gitlab_token = (
+        request.gitlab_token
+        or ""
+    ).strip()
+
+    # ========================================================
+    # BASIC VALIDATION
+    # ========================================================
+
+    if not all(
+        [
+            username,
+            password,
+            gitlab_token
+        ]
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail="All fields are required."
+        )
+
+    # ========================================================
+    # CHECK APPLICATION USERNAME
+    # ========================================================
+
+    if user_exists(
+        username
+    ):
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Username already exists. "
+                "Please choose another username."
+            )
+        )
+
+    # ========================================================
+    # VALIDATE GITLAB TOKEN
+    # ========================================================
+
+    try:
+
+        gitlab_response = requests.get(
+            "https://gitlab.com/api/v4/user",
+            headers={
+                "PRIVATE-TOKEN": gitlab_token
+            },
+            timeout=20
+        )
+
+    except requests.RequestException as error:
+
+        print(
+            "GITLAB VALIDATION ERROR:",
+            error
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Unable to connect to GitLab. "
+                "Please try again."
+            )
+        )
+
+    # --------------------------------------------------------
+    # Invalid / expired token
+    # --------------------------------------------------------
+
+    if gitlab_response.status_code == 401:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid or expired GitLab "
+                "access token."
+            )
+        )
+
+    # --------------------------------------------------------
+    # Other GitLab errors
+    # --------------------------------------------------------
+
+    if gitlab_response.status_code != 200:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "GitLab authentication failed. "
+                f"GitLab returned status "
+                f"{gitlab_response.status_code}."
+            )
+        )
+
+    # ========================================================
+    # GET AUTHENTICATED GITLAB IDENTITY
+    # ========================================================
+
+    gitlab_user = (
+        gitlab_response.json()
+    )
+
+    actual_gitlab_username = (
+        gitlab_user.get(
+            "username",
+            ""
+        )
+        or ""
+    ).strip()
+
+    if not actual_gitlab_username:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "GitLab token was valid, but "
+                "the authenticated GitLab username "
+                "could not be determined."
+            )
+        )
+
+    # ========================================================
+    # CREATE USER
+    # ========================================================
+
+    try:
+
+        create_user(
+            username=username,
+            password=password,
+            gitlab_username=(
+                actual_gitlab_username
+            ),
+            gitlab_token=gitlab_token
+        )
+
+    except sqlite3.IntegrityError:
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Username already exists."
+            )
+        )
+
+    except Exception as error:
+
+        print(
+            "USER CREATION ERROR:",
+            error
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Unable to create account."
+            )
+        )
+
+    # ========================================================
+    # SUCCESS
+    # ========================================================
+
+    return {
+        "status": "registered",
+        "username": username,
+        "gitlab_username": (
+            actual_gitlab_username
+        ),
+        "message": (
+            "Registration successful. "
+            "Please log in."
+        )
+    }
+# ============================================================
 # GET MERGE REQUEST APPROVAL HISTORY
 # ============================================================
 
@@ -2227,4 +2561,68 @@ async def get_approval_history(
     return {
         "mr_iid": mr_iid,
         "approvals": approvals
+    }
+
+# ============================================================
+# GET LOGGED-IN USER'S GITLAB PROJECTS
+# ============================================================
+
+@app.get("/gitlab/projects")
+async def get_gitlab_projects(
+    username: str = Depends(get_current_user)
+):
+
+    gitlab_token = get_gitlab_token(
+        username
+    )
+
+    if not gitlab_token:
+
+        raise HTTPException(
+            status_code=400,
+            detail="No GitLab token found for this user."
+        )
+
+    response = requests.get(
+        "https://gitlab.com/api/v4/projects",
+        headers={
+            "PRIVATE-TOKEN": gitlab_token
+        },
+        params={
+            "membership": "true",
+            "simple": "true",
+            "per_page": 100,
+            "order_by": "last_activity_at",
+            "sort": "desc"
+        },
+        timeout=20
+    )
+
+    if response.status_code != 200:
+
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=(
+                "Unable to fetch GitLab projects: "
+                f"{response.text}"
+            )
+        )
+
+    projects = response.json()
+
+    return {
+        "projects": [
+            {
+                "id": project["id"],
+                "name": project["name"],
+                "path_with_namespace": (
+                    project["path_with_namespace"]
+                ),
+                "web_url": project["web_url"],
+                "default_branch": (
+                    project.get("default_branch")
+                )
+            }
+            for project in projects
+        ]
     }

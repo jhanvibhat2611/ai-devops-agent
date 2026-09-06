@@ -119,7 +119,9 @@ def agent_view(page):
         response = start_chat(
             message,
             current_thread_id,
-            token=page.auth_token
+            token=page.auth_token,
+            project_id=page.gitlab_project_id,
+            default_branch=page.gitlab_default_branch
         )
 
         # --------------------------------------------------------
@@ -246,7 +248,9 @@ def agent_view(page):
                     selected_response = start_chat(
                         selected_message,
                         current_thread_id,
-                        token
+                        token=token,
+                        project_id=page.gitlab_project_id,
+                        default_branch=page.gitlab_default_branch
                     )
 
                     if selected_response.get(

@@ -147,38 +147,65 @@ def search_merge_requests(query):
 
     return response.json()
 
-def start_chat(message, thread_id=None, token=None):
+def start_chat(
+    message,
+    thread_id=None,
+    token=None,
+    project_id=None,
+    default_branch=None
+):
 
     payload = {
-        "message": message
+        "message": message,
+        "project_id": project_id,
+        "default_branch": default_branch
     }
 
     if thread_id:
-        payload["thread_id"] = thread_id
+
+        payload["thread_id"] = (
+            thread_id
+        )
 
     response = requests.post(
         f"{BASE_URL}/chat",
         json=payload,
-        headers=get_headers(token)
+        headers=get_headers(
+            token
+        )
     )
 
-    print("========== CHAT RESPONSE ==========")
-    print("STATUS:", response.status_code)
-    print("TEXT:", response.text)
-    print("===================================")
+    print(
+        "========== CHAT RESPONSE =========="
+    )
+
+    print(
+        "STATUS:",
+        response.status_code
+    )
+
+    print(
+        "TEXT:",
+        response.text
+    )
+
+    print(
+        "==================================="
+    )
 
     try:
+
         return response.json()
 
     except ValueError:
+
         return {
             "status": "error",
             "message": (
-                f"Backend returned invalid response: "
+                "Backend returned invalid response: "
                 f"{response.text}"
             )
         }
-
 def send_chat_decision(
     thread_id,
     approved,
@@ -226,3 +253,74 @@ def get_merge_request_approval_history(mr_id):
     )
 
     return response.json()
+
+def get_gitlab_projects(token):
+
+    response = requests.get(
+        f"{BASE_URL}/gitlab/projects",
+        headers=get_headers(token)
+    )
+
+    if response.status_code != 200:
+
+        try:
+            return {
+                "error": True,
+                "message": response.json().get(
+                    "detail",
+                    "Unable to fetch GitLab projects."
+                )
+            }
+
+        except ValueError:
+            return {
+                "error": True,
+                "message": (
+                    "Unable to fetch GitLab projects."
+                )
+            }
+
+    return response.json()
+
+def register_user(
+    username,
+    password,
+    gitlab_token
+):
+
+    response = requests.post(
+        f"{BASE_URL}/register",
+        json={
+            "username": username,
+            "password": password,
+            "gitlab_token": gitlab_token
+        }
+    )
+
+    try:
+
+        data = response.json()
+
+    except ValueError:
+
+        return {
+            "error": True,
+            "message": (
+                "Backend returned an invalid response."
+            )
+        }
+
+    if response.status_code not in [
+        200,
+        201
+    ]:
+
+        return {
+            "error": True,
+            "message": data.get(
+                "detail",
+                "Registration failed."
+            )
+        }
+
+    return data

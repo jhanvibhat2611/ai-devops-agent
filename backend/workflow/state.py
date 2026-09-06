@@ -2,7 +2,21 @@ from typing import TypedDict
 
 
 class WorkflowState(TypedDict):
+
+    # ============================================================
+    # USER / REPOSITORY CONTEXT
+    # ============================================================
+
     username: str
+
+    gitlab_project_id: int
+
+    gitlab_default_branch: str
+
+    # ============================================================
+    # REQUEST
+    # ============================================================
+
     user_request: str
 
     request_valid: bool
@@ -14,14 +28,27 @@ class WorkflowState(TypedDict):
 
     generated_code: str
 
+    # ============================================================
+    # TESTING
+    # ============================================================
+
     test_result: str
     test_passed: bool
+
+    # ============================================================
+    # SECURITY
+    # ============================================================
 
     security_report: str
     security_passed: bool
 
+    # ============================================================
+    # GIT / MERGE REQUEST
+    # ============================================================
+
     branch_name: str
     use_existing_branch: bool
+
     commit_message: str
     mr_title: str
 

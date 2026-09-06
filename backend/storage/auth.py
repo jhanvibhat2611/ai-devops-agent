@@ -186,3 +186,116 @@ def get_gitlab_token(
     ).decode()
 
     return decrypted_token
+
+def update_gitlab_token(
+    username,
+    gitlab_token
+):
+
+    encrypted_token = cipher.encrypt(
+        gitlab_token.encode()
+    ).decode()
+
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        UPDATE users
+        SET gitlab_token = ?
+        WHERE username = ?
+        """,
+        (
+            encrypted_token,
+            username
+        )
+    )
+
+    connection.commit()
+    connection.close()
+
+    return True
+
+# ============================================================
+# CHECK IF USER EXISTS
+# ============================================================
+
+def user_exists(
+    username
+):
+
+    connection = get_connection()
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            SELECT id
+            FROM users
+            WHERE username = ?
+            """,
+            (
+                username,
+            )
+        )
+
+        user = cursor.fetchone()
+
+        return user is not None
+
+    finally:
+
+        connection.close()
+
+
+# ============================================================
+# CREATE USER
+# ============================================================
+
+def create_user(
+    username,
+    password,
+    gitlab_username,
+    gitlab_token
+):
+
+    encrypted_token = cipher.encrypt(
+        gitlab_token.encode()
+    ).decode()
+
+    connection = get_connection()
+
+    try:
+
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            INSERT INTO users (
+                username,
+                password,
+                gitlab_username,
+                gitlab_token
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                username,
+                password,
+                gitlab_username,
+                encrypted_token
+            )
+        )
+
+        connection.commit()
+
+    except Exception:
+
+        connection.rollback()
+        raise
+
+    finally:
+
+        connection.close()

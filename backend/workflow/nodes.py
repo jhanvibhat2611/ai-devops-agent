@@ -103,6 +103,17 @@ def retrieve_context(state: WorkflowState):
 # ============================================================
 
 def analyze_requirement(state: WorkflowState):
+    print("\n========== LANGGRAPH STATE ==========")
+    print("User:", state.get("username"))
+    print(
+        "Project ID:",
+        state.get("gitlab_project_id")
+    )
+    print(
+        "Default branch:",
+        state.get("gitlab_default_branch")
+    )
+    print("=====================================\n")
 
     print("\n========== ANALYZE REQUIREMENT ==========")
 
@@ -1829,21 +1840,65 @@ def create_branch(
 ):
 
     from main import create_gitlab_branch
+    from storage.auth import get_gitlab_token
 
-    branch_name = state["branch_name"]
+    branch_name = state[
+        "branch_name"
+    ]
+
+    username = state[
+        "username"
+    ]
+
+    project_id = state[
+        "gitlab_project_id"
+    ]
+
+    default_branch = (
+        state.get(
+            "gitlab_default_branch"
+        )
+        or "main"
+    )
 
     use_existing_branch = state.get(
         "use_existing_branch",
         False
     )
 
+    gitlab_token = get_gitlab_token(
+        username
+    )
+
+    if not gitlab_token:
+
+        raise RuntimeError(
+            "GitLab token not found "
+            f"for user: {username}"
+        )
+
     print(
         "\n========== CREATE / SELECT BRANCH =========="
     )
 
     print(
+        "User:",
+        username
+    )
+
+    print(
+        "Project ID:",
+        project_id
+    )
+
+    print(
         "Branch:",
         branch_name
+    )
+
+    print(
+        "Default branch:",
+        default_branch
     )
 
     print(
@@ -1873,7 +1928,9 @@ def create_branch(
 
     result = create_gitlab_branch(
         branch_name=branch_name,
-        ref="main"
+        ref=default_branch,
+        project_id=project_id,
+        gitlab_token=gitlab_token
     )
 
     print(
@@ -2158,16 +2215,58 @@ def commit_generated_code(state: WorkflowState):
 # CREATE MERGE REQUEST
 # ============================================================
 
-def create_merge_request(state: WorkflowState):
+def create_merge_request(
+    state: WorkflowState
+):
 
-    from main import create_gitlab_merge_request
+    from main import (
+        create_gitlab_merge_request
+    )
 
-    print("\n========== CREATE MERGE REQUEST ==========")
+    from storage.auth import (
+        get_gitlab_token
+    )
+
+    print(
+        "\n========== CREATE MERGE REQUEST =========="
+    )
+
+    username = state[
+        "username"
+    ]
+
+    project_id = state[
+        "gitlab_project_id"
+    ]
+
+    default_branch = (
+        state.get(
+            "gitlab_default_branch"
+        )
+        or "main"
+    )
+
+    gitlab_token = get_gitlab_token(
+        username
+    )
+
+    if not gitlab_token:
+
+        raise RuntimeError(
+            "GitLab token not found "
+            f"for user: {username}"
+        )
 
     result = create_gitlab_merge_request(
-        source=state["branch_name"],
-        target="main",
-        title=state["mr_title"]
+        source=state[
+            "branch_name"
+        ],
+        target=default_branch,
+        title=state[
+            "mr_title"
+        ],
+        project_id=project_id,
+        gitlab_token=gitlab_token
     )
 
     print(
@@ -2175,14 +2274,25 @@ def create_merge_request(state: WorkflowState):
         result
     )
 
+    if (
+        isinstance(result, dict)
+        and "error" in result
+    ):
+
+        raise RuntimeError(
+            "Unable to create Merge Request: "
+            f"{result.get('message', result)}"
+        )
+
     return {
-        "mr_iid": result.get("iid"),
+        "mr_iid": result.get(
+            "iid"
+        ),
         "mr_url": result.get(
             "web_url",
             ""
         )
     }
-
 
 # ============================================================
 # HUMAN APPROVAL
