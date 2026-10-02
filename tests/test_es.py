@@ -1,13 +1,10 @@
-from backend import es
+"""Read-only local Elasticsearch smoke check; opt in explicitly."""
+import os
+import pytest
 
-response = es.search(
-    index="gitlab_merge_requests",
-    query={"match_all": {}},
-    size=10
-)
-
-print(f"Found {response['hits']['total']['value']} documents\n")
-
-for hit in response["hits"]["hits"]:
-    print(hit["_source"])
-    print("-" * 50)
+@pytest.mark.live
+def test_live_elasticsearch():
+    if os.getenv("RUN_LIVE_TESTS") != "1":
+        pytest.skip("Set RUN_LIVE_TESTS=1 for local service checks")
+    from elasticsearch_client import es
+    assert es.ping()

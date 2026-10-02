@@ -1,326 +1,97 @@
+"""HTTP client. Repository operations are bound to the current Flet page."""
+import os
 import requests
+BASE_URL = os.getenv("AGENT_API_URL", "http://127.0.0.1:8003")
 
 
+def request(method, path, *, token=None, project_id=None, payload=None, params=None):
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    query = dict(params or {})
+    if project_id is not None:
+        query["project_id"] = project_id
+    try:
+        response = requests.request(method, BASE_URL + path, json=payload, params=query, headers=headers, timeout=(10, 300))
+        data = response.json()
+        if not response.ok:
+            message = data.get("detail", "Request failed.")
+            return {"error": True, "status": "error", "message": message, "detail": message}
+        return data
+    except (requests.RequestException, ValueError):
+        return {"error": True, "status": "error", "message": "Backend unavailable or returned invalid data. Retry after checking its status."}
 
-BASE_URL = "http://127.0.0.1:8000"
-
-def get_headers(token=None):
-
-    headers = {}
-
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    return headers
 
 def login_user(username, password):
+    return request("POST", "/login", payload={"username": username, "password": password})
 
-    response = requests.post(
-        f"{BASE_URL}/login",
-        json={
-            "username": username,
-            "password": password
-        }
-    )
 
-    return response.json()
+def register_user(username, password, gitlab_token):
+    return request("POST", "/register", payload=dict(username=username, password=password, gitlab_token=gitlab_token))
 
 
 def get_home():
-    response = requests.get(f"{BASE_URL}/")
-    return response.json()
+    return request("GET", "/")
 
-def get_branches():
-    response = requests.get(f"{BASE_URL}/branches")
-    return response.json()
-def create_branch(branch_name, ref):
-    payload = {
-        "branch_name": branch_name,
-        "ref": ref
-    }
-
-    response = requests.post(
-        f"{BASE_URL}/create-branch",
-        json=payload
-    )
-
-    return response.json()
-
-def get_merge_requests():
-    response = requests.get(f"{BASE_URL}/merge-requests")
-    return response.json()
-def create_merge_request(source, target, title):
-
-    payload = {
-        "source_branch": source,
-        "target_branch": target,
-        "title": title
-    }
-
-    response = requests.post(
-        f"{BASE_URL}/create-merge-request",
-        json=payload
-    )
-
-    return response.json()
-
-def get_merge_request(mr_id):
-    response = requests.get(
-        f"{BASE_URL}/merge-request/{mr_id}"
-    )
-
-    return response.json()
-
-def add_comment(mr_id, comment):
-
-    payload = {
-        "body": comment
-    }
-
-    response = requests.post(
-        f"{BASE_URL}/merge-request/{mr_id}/comment",
-        json=payload
-    )
-
-    return response.json()
-
-def review_merge_request(mr_id):
-
-    response = requests.get(
-        f"{BASE_URL}/review/{mr_id}"
-    )
-
-    return response.json()
-def post_ai_review(mr_id):
-    response = requests.post(
-        f"{BASE_URL}/review/{mr_id}/post"
-    )
-
-    return response.json()
-
-def post_ai_suggestion(mr_id, suggestion):
-
-    response = requests.post(
-        f"{BASE_URL}/suggest/{mr_id}/post",
-        json={
-            "suggestion": suggestion
-        }
-    )
-
-    return response.json()
-
-def accept_ai_suggestion(
-    mr_id,
-    file,
-    previous_code,
-    current_code,
-    suggested_code
-):
-    response = requests.post(
-        f"{BASE_URL}/suggest/{mr_id}/accept",
-        json={
-            "file": file,
-            "previous_code": previous_code,
-            "current_code": current_code,
-            "suggested_code": suggested_code
-        }
-    )
-
-    return response.json()
-
-def suggest_merge_request(mr_id):
-
-    response = requests.get(
-        f"{BASE_URL}/suggest/{mr_id}"
-    )
-
-    return response.json()
-
-def search_merge_requests(query):
-
-    response = requests.get(
-        f"{BASE_URL}/search",
-        params={
-            "query": query
-        }
-    )
-
-    return response.json()
-
-def start_chat(
-    message,
-    thread_id=None,
-    token=None,
-    project_id=None,
-    default_branch=None
-):
-
-    payload = {
-        "message": message,
-        "project_id": project_id,
-        "default_branch": default_branch
-    }
-
-    if thread_id:
-
-        payload["thread_id"] = (
-            thread_id
-        )
-
-    response = requests.post(
-        f"{BASE_URL}/chat",
-        json=payload,
-        headers=get_headers(
-            token
-        )
-    )
-
-    print(
-        "========== CHAT RESPONSE =========="
-    )
-
-    print(
-        "STATUS:",
-        response.status_code
-    )
-
-    print(
-        "TEXT:",
-        response.text
-    )
-
-    print(
-        "==================================="
-    )
-
-    try:
-
-        return response.json()
-
-    except ValueError:
-
-        return {
-            "status": "error",
-            "message": (
-                "Backend returned invalid response: "
-                f"{response.text}"
-            )
-        }
-def send_chat_decision(
-    thread_id,
-    approved,
-    username,
-    token=None,
-    branch_name=None,
-    use_existing_branch=False
-):
-
-    payload = {
-        "thread_id": thread_id,
-        "approved": approved,
-        "username": username,
-        "use_existing_branch": use_existing_branch
-    }
-
-    if branch_name:
-        payload["branch_name"] = branch_name
-
-    response = requests.post(
-        f"{BASE_URL}/chat/decision",
-        json=payload,
-        headers=get_headers(token)
-    )
-
-    print(
-        "\n========== CHAT DECISION RESPONSE =========="
-    )
-    print("STATUS:", response.status_code)
-    print("TEXT:", response.text)
-    print(
-        "============================================\n"
-    )
-
-    response.raise_for_status()
-
-    if response.text.strip():
-        return response.json()
-
-    return {}
-def get_merge_request_approval_history(mr_id):
-
-    response = requests.get(
-        f"{BASE_URL}/merge-request/{mr_id}/approval-history"
-    )
-
-    return response.json()
 
 def get_gitlab_projects(token):
+    return request("GET", "/gitlab/projects", token=token)
 
-    response = requests.get(
-        f"{BASE_URL}/gitlab/projects",
-        headers=get_headers(token)
-    )
 
-    if response.status_code != 200:
+class RepositoryAPI:
+    def __init__(self, page):
+        self.page = page
 
-        try:
-            return {
-                "error": True,
-                "message": response.json().get(
-                    "detail",
-                    "Unable to fetch GitLab projects."
-                )
-            }
+    def call(self, method, path, payload=None, params=None):
+        project_id = getattr(self.page, "gitlab_project_id", None)
+        if not project_id:
+            return {"error": True, "message": "Select a repository in AI Agent chat first."}
+        return request(method, path, token=self.page.auth_token, project_id=project_id, payload=payload, params=params)
 
-        except ValueError:
-            return {
-                "error": True,
-                "message": (
-                    "Unable to fetch GitLab projects."
-                )
-            }
+    def get_branches(self):
+        return self.call("GET", "/branches")
 
-    return response.json()
+    def create_branch(self, branch_name, ref):
+        return self.call("POST", "/create-branch", dict(branch_name=branch_name, ref=ref))
 
-def register_user(
-    username,
-    password,
-    gitlab_token
-):
+    def get_merge_requests(self):
+        return self.call("GET", "/merge-requests")
 
-    response = requests.post(
-        f"{BASE_URL}/register",
-        json={
-            "username": username,
-            "password": password,
-            "gitlab_token": gitlab_token
-        }
-    )
+    def create_merge_request(self, source, target, title):
+        return self.call("POST", "/create-merge-request", dict(source_branch=source, target_branch=target, title=title))
 
-    try:
+    def get_merge_request(self, mr_id):
+        return self.call("GET", f"/merge-request/{mr_id}")
 
-        data = response.json()
+    def get_mr_changes(self, mr_id):
+        return self.call("GET", f"/merge-request/{mr_id}/code-diffs")
 
-    except ValueError:
+    def add_comment(self, mr_id, comment):
+        return self.call("POST", f"/merge-request/{mr_id}/comment", {"body": comment})
 
-        return {
-            "error": True,
-            "message": (
-                "Backend returned an invalid response."
-            )
-        }
+    def review_merge_request(self, mr_id):
+        return self.call("GET", f"/review/{mr_id}")
 
-    if response.status_code not in [
-        200,
-        201
-    ]:
+    def post_ai_review(self, mr_id, review_id):
+        return self.call("POST", f"/review/{mr_id}/post", {"review_id": review_id})
 
-        return {
-            "error": True,
-            "message": data.get(
-                "detail",
-                "Registration failed."
-            )
-        }
+    def post_ai_suggestion(self, mr_id, suggestion):
+        return self.call("POST", f"/suggest/{mr_id}/post", {"suggestion": suggestion})
 
-    return data
+    def accept_ai_suggestion(self, mr_id, proposal_id):
+        return self.call("POST", f"/suggest/{mr_id}/accept", {"proposal_id": proposal_id})
+
+    def suggest_merge_request(self, mr_id):
+        return self.call("GET", f"/suggest/{mr_id}")
+
+    def search_merge_requests(self, query):
+        return self.call("GET", "/search", params={"query": query})
+
+    def get_merge_request_approval_history(self, mr_id):
+        return self.call("GET", f"/merge-request/{mr_id}/approval-history")
+
+    def start_chat(self, message, thread_id=None):
+        return request("POST", "/chat", token=self.page.auth_token, payload={"message": message,
+            "thread_id": thread_id, "project_id": getattr(self.page, "gitlab_project_id", None)})
+
+    def send_chat_decision(self, thread_id, workflow_id, approved, branch_name=None, use_existing_branch=False):
+        return self.call("POST", "/chat/decision", dict(thread_id=thread_id, approved=approved,
+            workflow_id=workflow_id, project_id=self.page.gitlab_project_id, branch_name=branch_name, use_existing_branch=use_existing_branch))

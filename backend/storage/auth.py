@@ -1,5 +1,6 @@
 import sqlite3
 import os
+from .passwords import hash_password, check_password
 
 from cryptography.fernet import Fernet
 
@@ -104,7 +105,12 @@ def verify_user(
 
         return False
 
-    return user[0] == password
+    valid, legacy = check_password(password, user[0])
+    if valid and legacy:
+        with get_connection() as connection:
+            connection.execute("UPDATE users SET password = ? WHERE username = ? AND password = ?",
+                               (hash_password(password), username, user[0]))
+    return valid
 
 
 # ============================================================
@@ -283,7 +289,7 @@ def create_user(
             """,
             (
                 username,
-                password,
+                hash_password(password),
                 gitlab_username,
                 encrypted_token
             )

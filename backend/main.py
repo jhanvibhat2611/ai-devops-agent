@@ -1,135 +1,83 @@
-from fastapi import FastAPI
-import requests
-import sqlite3
-from dotenv import load_dotenv
-import os
-import json
-import re
-from elasticsearch_client import (
-    search_merge_requests,
-    merge_request_exists,
-    get_merge_request_from_es,
-    update_merge_request,
-    bulk_index_merge_requests,
-    get_mr_context_for_suggestions
-)
-from ai_review import review_code,suggest_code
-import uuid
-import sys
-import os
+"""Authenticated repository-aware FastAPI application.
 
-sys.path.append(
-    os.path.abspath(
-        os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "frontend"
-        )
-    )
-)
-from datetime import datetime, timedelta, timezone
-import jwt
-from fastapi import HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
-from storage.auth import (
-    verify_user,
-    get_user,
-    get_gitlab_token,
-    user_exists,
-    create_user
-)
-from storage.approval_history import (
-    save_merge_request_approval,
-    get_merge_request_approvals
-)
-from pydantic import BaseModel
-from langgraph.types import Command
-
-from workflow.graph import graph
+Thread checkpoints and review proposals are process-local: run one API worker.
+"""
 import base64
+import hashlib
+import hmac
+import json
+import os
+import re
+import threading
+import uuid
+from dataclasses import dataclass
 from urllib.parse import quote
-chat_sessions = {}
-# created a FastAPI application
+
+from dotenv import load_dotenv
 load_dotenv()
+if not os.getenv("JWT_SECRET_KEY", "").strip():
+    raise RuntimeError("JWT_SECRET_KEY must be configured before starting the backend.")
+
+import jwt
+from fastapi import FastAPI, Depends, HTTPException, Header, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+from langgraph.types import Command
+from workflow.graph import graph
+from workflow.safety import target_path
+from storage.auth import get_gitlab_token, get_user
+from storage.database import get_connection
+from storage.approval_history import get_merge_request_approvals
+from storage.account_routes import app as accounts
+from gitlab import client
+from elasticsearch_client import search_merge_requests, bulk_index_merge_requests, get_mr_context_for_suggestions
+from ai_review import review_code, suggest_code
 
 app = FastAPI()
+app.include_router(accounts)
+security = HTTPBearer(auto_error=False)
+JWT_SECRET_KEY = os.environ["JWT_SECRET_KEY"]
+chat_sessions = {}
+proposals = {}
+state_lock = threading.RLock()
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "super-secret-key")
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_HOURS = 24
 
-security = HTTPBearer()
-
-
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-):
-
-    token = credentials.credentials
-
-    print("\n========== JWT DEBUG ==========")
-    print("Received token:", token)
-    print("JWT_SECRET_KEY:", JWT_SECRET_KEY)
-    print("JWT_ALGORITHM:", JWT_ALGORITHM)
-    print("================================\n")
-
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if credentials is None:
+        raise HTTPException(401, "Authentication required.")
     try:
-
-        payload = jwt.decode(
-            token,
-            JWT_SECRET_KEY,
-            algorithms=[JWT_ALGORITHM]
-        )
-
-        print("Decoded payload:", payload)
-
-        username = payload.get("sub")
-
-        if username is None:
-
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid authentication token"
-            )
-
+        payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=["HS256"], options={"require": ["exp", "sub"]})
+        username = payload["sub"]
+        if not isinstance(username, str) or not username or not get_user(username):
+            raise HTTPException(401, "Invalid authentication token.")
         return username
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid or expired authentication token.") from None
 
-    except jwt.ExpiredSignatureError:
 
-        print("JWT ERROR: Token expired")
+@dataclass
+class Repository:
+    username: str
+    project_id: int
+    token: str
+    project: dict
 
-        raise HTTPException(
-            status_code=401,
-            detail="Token has expired"
-        )
 
-    except jwt.InvalidTokenError as e:
+def authorize_project(username, project_id):
+    token = get_gitlab_token(username)
+    if not token:
+        raise HTTPException(400, "No GitLab token configured for this account.")
+    project = client.get("", project_id, token)
+    return Repository(username, project_id, token, project)
 
-        print("JWT ERROR:", str(e))
 
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid authentication token"
-        )
-# Read values from .env
-TOKEN = os.getenv("GITLAB_TOKEN")
-PROJECT_ID = os.getenv("GITLAB_PROJECT_ID")
+def selected_repository(project_id: int = Query(gt=0), username: str = Depends(get_current_user)):
+    return authorize_project(username, project_id)
 
-# GitLab authentication header
-headers = {
-    "PRIVATE-TOKEN": TOKEN
-}
 
-#pydantic model for creating a new branch
 class BranchRequest(BaseModel):
     branch_name: str
     ref: str
-
-class RegisterRequest(BaseModel):
-    username: str
-    password: str
-    gitlab_token: str
 
 class MergeRequest(BaseModel):
     source_branch: str
@@ -140,2489 +88,426 @@ class CommentRequest(BaseModel):
     body: str
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = ""
     thread_id: str | None = None
-
-    project_id: int
+    project_id: int | None = Field(default=None, gt=0)
     default_branch: str | None = None
+    clone_url: str | None = None
 
 class ChatDecisionRequest(BaseModel):
     thread_id: str
+    workflow_id: str
+    project_id: int = Field(gt=0)
     approved: bool
     branch_name: str | None = None
     use_existing_branch: bool = False
 
+class PostSuggestionRequest(BaseModel):
+    suggestion: str
 
-class SuggestionRequest(BaseModel):
-    file: str
-    # previous_code: str
-    current_code: str
-    suggested_code: str
+class AcceptSuggestionRequest(BaseModel):
+    proposal_id: str
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+class PostReviewRequest(BaseModel):
+    review_id: str
 
-#reusable gitlab function for get
-def make_gitlab_request(
-    endpoint: str,
-    project_id=None,
-    gitlab_token=None
-):
 
-    effective_project_id = (
-        project_id
-        or PROJECT_ID
-    )
+def make_gitlab_request(endpoint, project_id=None, gitlab_token=None):
+    return client.get(endpoint, project_id, gitlab_token)
 
-    effective_token = (
-        gitlab_token
-        or TOKEN
-    )
 
-    url = (
-        "https://gitlab.com/api/v4/projects/"
-        f"{effective_project_id}/{endpoint}"
-    )
+def make_gitlab_post_request(endpoint, payload, project_id=None, gitlab_token=None):
+    return client.post(endpoint, payload, project_id, gitlab_token)
 
-    response = requests.get(
-        url,
-        headers={
-            "PRIVATE-TOKEN": effective_token
-        },
-        timeout=30
-    )
 
-    if response.status_code == 200:
-        return response.json()
-
-    return {
-        "error": response.status_code,
-        "message": response.text
-    }
-
-def get_file_content(file_path: str, branch: str):
-
-    encoded_path = quote(file_path, safe="")
-
-    endpoint = (
-        f"repository/files/{encoded_path}"
-        f"?ref={quote(branch, safe='')}"
-    )
-
-    result = make_gitlab_request(endpoint)
-
-    if "content" not in result:
-        return None
-
-    content = base64.b64decode(
-        result["content"]
-    ).decode("utf-8")
-
-    print("========== RAW FILE CONTENT ==========")
-    print(repr(content))
-    print("======================================")
-
-    return content
-def get_merge_request_source_files(mr_iid: int):
-
-    mr = fetch_merge_request(mr_iid)
-
-    if "source_branch" not in mr:
-        return {
-            "error": mr.get(
-                "message",
-                "Unable to get source branch."
-            )
-        }
-
-    source_branch = mr["source_branch"]
-
-    changes = get_merge_request_changes(mr_iid)
-
-    if "changes" not in changes:
-        return {
-            "error": changes.get(
-                "message",
-                "Unable to get Merge Request changes."
-            )
-        }
-
-    files = []
-
-    for change in changes["changes"]:
-
-        file_path = change.get("new_path")
-
-        if not file_path:
-            continue
-
-        content = get_file_content(
-            file_path,
-            source_branch
-        )
-
-        if content is not None:
-
-            files.append({
-                "file": file_path,
-                "content": content
-            })
-
-    return files
-
-def get_merge_request_source_branch(mr_iid: int):
-
-    mr = make_gitlab_request(
-        f"merge_requests/{mr_iid}"
-    )
-
-    if "error" in mr:
-        return mr
-
-    return {
-        "source_branch": mr["source_branch"]
-    }
-def get_open_merge_requests():
-
-    endpoint = (
-        "merge_requests"
-        "?state=opened"
-        "&per_page=20"
-    )
-
-    result = make_gitlab_request(endpoint)
-
-    if isinstance(result, dict) and "error" in result:
-        return result
-
-    if not isinstance(result, list):
-        return []
-
+def create_gitlab_branch(branch_name, ref, project_id=None, gitlab_token=None):
+    result = client.post("repository/branches", {"branch": branch_name, "ref": ref}, project_id, gitlab_token)
+    if not result.get("name"):
+        raise HTTPException(502, "GitLab did not confirm branch creation.")
     return result
-def apply_ai_suggestion(
-    mr_iid: int,
-    file_path: str,
-    current_code: str,
-    suggested_code: str
-):
-
-    # ------------------------------------------------------------
-    # Get Merge Request details
-    # ------------------------------------------------------------
-
-    mr = make_gitlab_request(
-        f"merge_requests/{mr_iid}"
-    )
-
-    if "error" in mr:
-        return mr
-
-    source_branch = mr.get("source_branch")
-
-    if not source_branch:
-        return {
-            "error": 400,
-            "message": (
-                "Could not determine the Merge Request "
-                "source branch."
-            )
-        }
-
-    # ------------------------------------------------------------
-    # Get the ACTUAL current file from the source branch
-    # ------------------------------------------------------------
-
-    file_endpoint = (
-        f"repository/files/"
-        f"{quote(file_path, safe='')}"
-        f"?ref={quote(source_branch, safe='')}"
-    )
-
-    file_data = make_gitlab_request(file_endpoint)
-
-    if "error" in file_data:
-        return file_data
-
-    if "content" not in file_data:
-        return {
-            "error": 500,
-            "message": "Could not retrieve the current file content."
-        }
-
-    # ------------------------------------------------------------
-    # Decode the file
-    # ------------------------------------------------------------
-
-    try:
-
-        current_file_content = base64.b64decode(
-            file_data["content"]
-        ).decode("utf-8")
-
-    except Exception:
-
-        return {
-            "error": 500,
-            "message": (
-                "Could not decode the current file content."
-            )
-        }
-
-    # ------------------------------------------------------------
-    # Normalize only line endings for comparison
-    # ------------------------------------------------------------
-
-    normalized_current_code = (
-        current_code
-        .replace("\r\n", "\n")
-        .replace("\r", "\n")
-    )
-
-    normalized_file_content = (
-        current_file_content
-        .replace("\r\n", "\n")
-        .replace("\r", "\n")
-    )
-
-    # ------------------------------------------------------------
-    # Make sure the function has not changed
-    # ------------------------------------------------------------
-
-    if normalized_current_code not in normalized_file_content:
-
-        return {
-            "error": 409,
-            "message": (
-                "The selected code has changed since the "
-                "suggestion was generated. Please generate "
-                "a new suggestion before accepting it."
-            )
-        }
-
-    # ------------------------------------------------------------
-    # Replace ONLY the selected function
-    # ------------------------------------------------------------
-
-    updated_file_content = normalized_file_content.replace(
-        normalized_current_code,
-        suggested_code.strip(),
-        1
-    )
-
-    # ------------------------------------------------------------
-    # Create GitLab commit
-    # ------------------------------------------------------------
-
-    payload = {
-        "branch": source_branch,
-        "commit_message": (
-            f"Apply AI code suggestion to {file_path}"
-        ),
-        "actions": [
-            {
-                "action": "update",
-                "file_path": file_path,
-                "content": updated_file_content
-            }
-        ]
-    }
-
-    url = (
-        f"https://gitlab.com/api/v4/projects/"
-        f"{PROJECT_ID}/repository/commits"
-    )
-
-    response = requests.post(
-        url,
-        headers=headers,
-        json=payload
-    )
-
-    if response.status_code == 201:
-
-        return response.json()
-
-    return {
-        "error": response.status_code,
-        "message": response.text
-    }
-def get_commit_diff(commit_sha: str):
-
-    endpoint = f"repository/commits/{commit_sha}/diff"
-
-    return make_gitlab_request(endpoint)
-
-def get_merge_request_for_branch(branch: str):
-
-    endpoint = f"merge_requests?source_branch={branch}&state=opened"
-
-    return make_gitlab_request(endpoint)
-
-def extract_diff_text(changes):
-
-    diff_text = ""
-
-    for change in changes:
-
-        file_path = change.get("new_path")
-
-        raw_diff = change.get("diff", "")
-
-        clean_diff = []
-
-        for line in raw_diff.splitlines():
-
-            # Ignore Git diff metadata
-            if line.startswith("@@"):
-                continue
-
-            if line.startswith("+++"):
-                continue
-
-            if line.startswith("---"):
-                continue
-
-            clean_diff.append(line)
-
-        diff_text += (
-            f"\n===== FILE: {file_path} =====\n"
-        )
-
-        diff_text += "\n".join(clean_diff)
-
-        diff_text += (
-            "\n===== END FILE =====\n"
-        )
-
-    return diff_text
 
 
-def get_merge_request_changes(mr_iid: int):
+def create_gitlab_merge_request(source, target, title, project_id=None, gitlab_token=None):
+    result = client.post("merge_requests", {"source_branch": source, "target_branch": target, "title": title}, project_id, gitlab_token)
+    if not result.get("iid") or not result.get("web_url"):
+        raise HTTPException(502, "GitLab did not confirm Merge Request creation.")
+    return result
 
-    endpoint = f"merge_requests/{mr_iid}/changes"
 
-    return make_gitlab_request(endpoint)
-
-#reusable gitlab function for post
-def make_gitlab_post_request(
-    endpoint: str,
-    payload: dict,
-    project_id=None,
-    gitlab_token=None
-):
-
-    effective_project_id = (
-        project_id
-        or PROJECT_ID
-    )
-
-    effective_token = (
-        gitlab_token
-        or TOKEN
-    )
-
-    url = (
-        "https://gitlab.com/api/v4/projects/"
-        f"{effective_project_id}/{endpoint}"
-    )
-
-    response = requests.post(
-        url,
-        headers={
-            "PRIVATE-TOKEN": effective_token
-        },
-        data=payload,
-        timeout=30
-    )
-
-    if response.status_code in [
-        200,
-        201
-    ]:
-        return response.json()
-
-    return {
-        "error": response.status_code,
-        "message": response.text
-    }
-# Home endpoint
 @app.get("/")
-async def home():
-    return {
-        # converts automatically to JSON
-        "message": "Welcome to GitLab Resource Management API"
+def home():
+    return {"message": "Welcome to GitLab Resource Management API"}
 
-    }
-
-#get branches endpoint
 @app.get("/branches")
-async def get_branches():
-    return make_gitlab_request("repository/branches")
+def branches(repo: Repository = Depends(selected_repository)):
+    return client.pages("repository/branches", repo.project_id, repo.token)
 
-    #get commits endpoint
 @app.get("/commit/{commit_sha}")
-async def get_commit(commit_sha: str):
+def commit(commit_sha: str, repo: Repository = Depends(selected_repository)):
+    return client.get(f"repository/commits/{quote(commit_sha, safe='')}", repo.project_id, repo.token)
 
-    endpoint = f"repository/commits/{commit_sha}"
-
-    return make_gitlab_request(endpoint)
-
-#get pipelines endpoint
 @app.get("/pipeline/{pipeline_id}")
-async def get_pipeline(pipeline_id: int):
+def pipeline(pipeline_id: int, repo: Repository = Depends(selected_repository)):
+    return client.get(f"pipelines/{pipeline_id}", repo.project_id, repo.token)
 
-    endpoint = f"pipelines/{pipeline_id}"
-
-    return make_gitlab_request(endpoint)
-
-#get merge requests
-@app.get("/merge-requests")
-async def get_merge_requests():
-
-    # Fetch merge requests from GitLab
-    merge_requests = make_gitlab_request("merge_requests")
-
-    # List to store only new merge requests
-    new_documents = []
-
-    # Store merge requests in Elasticsearch
-    if isinstance(merge_requests, list):
-
-        for mr in merge_requests:
-
-            document = {
-                "mr_id": mr["iid"],
-                "title": mr["title"],
-                "description": mr["description"],
-                "state": mr["state"],
-                "author": mr["author"]["name"],
-                "created_at": mr["created_at"]
-            }
-
-            if merge_request_exists(document["mr_id"]):
-
-                existing_document = get_merge_request_from_es(document["mr_id"])
-
-                if existing_document == document:
-                    print(f"MR {document['mr_id']} unchanged")
-
-                else:
-                    update_merge_request(document)
-                    print(f"MR {document['mr_id']} updated")
-
-            else:
-                new_documents.append(document)
-                print(f"MR {document['mr_id']} queued for bulk insert")
-
-        # Bulk insert all new merge requests
-        if new_documents:
-            bulk_index_merge_requests(new_documents)
-
-    return merge_requests
-
-def create_gitlab_branch(
-    branch_name: str,
-    ref: str,
-    project_id=None,
-    gitlab_token=None
-):
-
-    payload = {
-        "branch": branch_name,
-        "ref": ref
-    }
-
-    return make_gitlab_post_request(
-        "repository/branches",
-        payload,
-        project_id=project_id,
-        gitlab_token=gitlab_token
-    )
-
-
-#post endpoint for creating branch
 @app.post("/create-branch")
-async def create_branch(branch: BranchRequest):
+def create_branch(request: BranchRequest, repo: Repository = Depends(selected_repository)):
+    return create_gitlab_branch(request.branch_name, request.ref, repo.project_id, repo.token)
 
-    return create_gitlab_branch(
-        branch.branch_name,
-        branch.ref
-    )
-
-def create_gitlab_merge_request(
-    source: str,
-    target: str,
-    title: str,
-    project_id=None,
-    gitlab_token=None
-):
-
-    payload = {
-        "source_branch": source,
-        "target_branch": target,
-        "title": title
-    }
-
-    return make_gitlab_post_request(
-        "merge_requests",
-        payload,
-        project_id=project_id,
-        gitlab_token=gitlab_token
-    )
-
-#merge request endpoint
 @app.post("/create-merge-request")
-async def create_merge_request(mr: MergeRequest):
-    return create_gitlab_merge_request(
-        mr.source_branch,
-        mr.target_branch,
-        mr.title
-    )
+def create_merge_request(request: MergeRequest, repo: Repository = Depends(selected_repository)):
+    return create_gitlab_merge_request(request.source_branch, request.target_branch, request.title, repo.project_id, repo.token)
 
+@app.get("/merge-requests")
+def merge_requests(repo: Repository = Depends(selected_repository)):
+    rows = client.pages("merge_requests", repo.project_id, repo.token)
+    bulk_index_merge_requests([{"project_id": repo.project_id, "mr_id": mr["iid"], "title": mr.get("title", ""),
+        "description": mr.get("description", ""), "state": mr.get("state"), "author": (mr.get("author") or {}).get("name", "")} for mr in rows])
+    return rows
 
-#endpoint for merge comments
-@app.post("/merge-request/{mr_iid}/comment")
-async def comment_on_merge_request(
-        mr_iid: int,
-        comment: CommentRequest
-):
-
-    endpoint = f"merge_requests/{mr_iid}/notes"
-
-    payload = {
-        "body": comment.body
-    }
-
-    return make_gitlab_post_request(
-        endpoint,
-        payload
-    )
-
-#enpoint to read a specific merge request
 @app.get("/merge-request/{mr_iid}")
-async def get_merge_request(mr_iid: int):
+def get_merge_request(mr_iid: int, repo: Repository = Depends(selected_repository)):
+    return client.get(f"merge_requests/{mr_iid}", repo.project_id, repo.token)
 
-    endpoint = f"merge_requests/{mr_iid}"
-
-    return make_gitlab_request(endpoint)
-
-def fetch_merge_request(mr_iid: int):
-
-    endpoint = f"merge_requests/{mr_iid}"
-
-    return make_gitlab_request(endpoint)
+@app.post("/merge-request/{mr_iid}/comment")
+def comment(mr_iid: int, request: CommentRequest, repo: Repository = Depends(selected_repository)):
+    result = client.post(f"merge_requests/{mr_iid}/notes", {"body": request.body}, repo.project_id, repo.token)
+    if not result.get("id"):
+        raise HTTPException(502, "GitLab did not confirm the comment.")
+    return result
 
 @app.get("/search")
-async def search(query: str):
-
-    return search_merge_requests(query)
-
-@app.get("/review/{mr_iid}")
-async def review_merge_request(mr_iid: int):
-
-    changes = get_merge_request_changes(mr_iid)
-
-    if "changes" not in changes:
-        return changes
-
-    diff_text = ""
-
-    for change in changes["changes"]:
-        diff_text += change["diff"] + "\n"
-
-    review = review_code(diff_text)
-
-    return {
-        "review": review
-    }
-
-@app.post("/suggest/{mr_iid}/post")
-async def post_suggestion_to_gitlab(
-    mr_iid: int,
-    request: SuggestionRequest
-):
-
-    result = post_ai_suggestion(
-        mr_iid,
-        request.suggestion
-    )
-
-    if "error" in result:
-
-        return {
-            "status": "failed",
-            "message": result.get(
-                "message",
-                "Failed to post AI suggestions."
-            )
-        }
-
-    return {
-        "status": "posted",
-        "message": "AI suggestions successfully posted to GitLab.",
-        "mr_url": result.get("web_url", "")
-    }
-
-@app.post("/suggest/{mr_iid}/accept")
-async def accept_suggestion(
-    mr_iid: int,
-    request: SuggestionRequest
-):
-    result = apply_ai_suggestion(
-        mr_iid,
-        request.file,
-        request.current_code,
-        request.suggested_code
-    )
-
-    if "error" in result:
-        return {
-            "status": "failed",
-            "message": result.get(
-                "message",
-                "Failed to apply AI suggestion."
-            )
-        }
-
-    return {
-        "status": "accepted",
-        "message": "AI suggestion applied and committed successfully.",
-        "commit_sha": result.get("id", ""),
-        "commit_url": result.get("web_url", "")
-    }
-
-@app.post("/review/{mr_iid}/post")
-async def post_ai_review_to_gitlab(mr_iid: int):
-
-    changes = get_merge_request_changes(mr_iid)
-
-    if "changes" not in changes:
-        return changes
-
-    if not changes["changes"]:
-        return {
-            "status": "error",
-            "message": "No changes found in this Merge Request."
-        }
-
-    diff_text = ""
-
-    for change in changes["changes"]:
-        diff_text += (
-            f"\nFile: {change.get('new_path')}\n"
-            f"{change.get('diff', '')}\n"
-        )
-
-    review = review_code(diff_text)
-
-    result = post_ai_review(
-        mr_iid,
-        review
-    )
-
-    return {
-        "status": "posted",
-        "mr_iid": mr_iid,
-        "review": review,
-        "gitlab_response": result
-    }
-def post_ai_review(mr_iid: int, review: str):
-
-    endpoint = f"merge_requests/{mr_iid}/notes"
-
-    payload = {
-        "body": f"## 🤖 AI Code Review\n\n{review}"
-    }
-
-    return make_gitlab_post_request(
-        endpoint,
-        payload
-    )
-
-def post_ai_suggestion(mr_iid: int, suggestion: str):
-
-    endpoint = f"merge_requests/{mr_iid}/notes"
-
-    payload = {
-        "body": f"## 💡 AI Code Suggestions\n\n{suggestion}"
-    }
-
-    return make_gitlab_post_request(
-        endpoint,
-        payload
-    )
-
-@app.get("/suggest/{mr_iid}")
-async def suggest_merge_request(mr_iid: int):
-
-    # ------------------------------------------------------------
-    # 1. Get Merge Request details
-    # ------------------------------------------------------------
-
-    mr = make_gitlab_request(
-        f"merge_requests/{mr_iid}"
-    )
-
-    if "error" in mr:
-        return mr
-
-    source_branch = mr.get("source_branch")
-
-    if not source_branch:
-        return {
-            "error": 400,
-            "message": "Could not determine source branch."
-        }
-
-    # ------------------------------------------------------------
-    # 2. Get changed files
-    # ------------------------------------------------------------
-
-    changes = get_merge_request_changes(mr_iid)
-
-    if "error" in changes:
-        return changes
-
-    if not changes.get("changes"):
-        return {
-            "type": "suggestion",
-            "mr_iid": mr_iid,
-            "suggestions": []
-        }
-
-    # ------------------------------------------------------------
-    # 3. Get ACTUAL current code from source branch
-    # ------------------------------------------------------------
-
-    file_contents = []
-
-    for change in changes["changes"]:
-
-        file_path = change.get("new_path")
-
-        if not file_path:
-            continue
-
-        file_result = get_file_content(
-            file_path,
-            source_branch
-        )
-
-        # get_file_content() returns None if the file
-        # could not be retrieved.
-        if file_result is None:
-            continue
-
-        file_contents.append({
-            "file": file_path,
-            "content": file_result
-        })
-
-    if not file_contents:
-        return {
-            "type": "suggestion",
-            "mr_iid": mr_iid,
-            "suggestions": []
-        }
-
-    # ------------------------------------------------------------
-    # 4. Search Elasticsearch for related Merge Requests
-    # ------------------------------------------------------------
-
-    print(
-        "\n🔍 Searching Elasticsearch for related Merge Requests..."
-    )
-
-    query_parts = []
-
-    if mr.get("title"):
-        query_parts.append(
-            mr.get("title")
-        )
-
-    if mr.get("description"):
-        query_parts.append(
-            mr.get("description")
-        )
-
-    search_query = " ".join(
-        query_parts
-    ).strip()
-
-    mr_context = []
-
-    if search_query:
-
-        try:
-
-            mr_context = search_merge_requests(
-                search_query
-            )
-
-            # Do not use the current MR as its own context.
-            mr_context = [
-                related_mr
-                for related_mr in mr_context
-                if str(
-                    related_mr.get("mr_id")
-                ) != str(mr_iid)
-            ]
-
-            # Keep only a small amount of relevant context.
-            mr_context = mr_context[:3]
-
-        except Exception as e:
-
-            print(
-                "⚠️ Elasticsearch search failed:",
-                e
-            )
-
-            mr_context = []
-
-    print(
-        f"✅ Found {len(mr_context)} related Merge Requests."
-    )
-
-    # ------------------------------------------------------------
-    # 5. Generate context-aware AI suggestions
-    # ------------------------------------------------------------
-
-    print(
-        "\n🤖 Generating context-aware AI code suggestions..."
-    )
-
-    suggestion_response = suggest_code(
-        file_contents,
-        mr_context
-    )
-
-    # ------------------------------------------------------------
-    # 6. Parse AI response
-    # ------------------------------------------------------------
-
-    try:
-
-        parsed_response = json.loads(
-            suggestion_response
-        )
-
-        suggestions = parsed_response.get(
-            "suggestions",
-            []
-        )
-
-    except json.JSONDecodeError:
-
-        suggestions = []
-
-    # ------------------------------------------------------------
-    # 7. Return suggestions
-    # ------------------------------------------------------------
-
-    return {
-        "type": "suggestion",
-        "mr_iid": mr_iid,
-        "suggestions": suggestions
-    }
-@app.post("/chat")
-async def chat(
-    request: ChatRequest,
-    username: str = Depends(
-        get_current_user
-    )
-):
-
-    message = request.message.strip()
-
-    project_id = (
-        request.project_id
-    )
-
-    default_branch = (
-            request.default_branch
-            or "main"
-    )
-
-    if not project_id:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No GitLab repository "
-                "was selected."
-            )
-        )
-
-    if not message:
-        return {
-            "status": "error",
-            "message": "Please enter a message."
-        }
-
-    # ============================================================
-    # CONVERSATION / THREAD SETUP
-    # ============================================================
-
-    thread_id = request.thread_id
-
-    if not thread_id:
-        thread_id = str(uuid.uuid4())
-
-    session = chat_sessions.setdefault(
-        thread_id,
-        {}
-    )
-
-    # ============================================================
-    # STORE USER + REPOSITORY CONTEXT IN SESSION
-    # ============================================================
-
-    session["username"] = username
-
-    session["gitlab_project_id"] = project_id
-
-    session["gitlab_default_branch"] = default_branch
-
-    lower_message = message.lower()
-
-    # ============================================================
-    # CONVERSATIONAL MR REVIEW REQUEST
-    # ============================================================
-
-    # Example:
-    # "I want to review an MR"
-    # "Can you review a merge request?"
-    #
-    # We only enter this block when the user has NOT
-    # already provided an MR number.
-
-    if (
-        "review" in lower_message
-        and (
-            "mr" in lower_message
-            or "merge request" in lower_message
-        )
-        and not re.search(
-            r"(?:mr|merge request)\s*!?\d+",
-            lower_message
-        )
-    ):
-
-        merge_requests = get_open_merge_requests()
-
-        if (
-            isinstance(merge_requests, dict)
-            and "error" in merge_requests
-        ):
-            return {
-                "type": "conversation",
-                "thread_id": thread_id,
-                "message": (
-                    "I couldn't retrieve the open "
-                    "Merge Requests."
-                )
-            }
-
-        if not merge_requests:
-
-            return {
-                "type": "conversation",
-                "thread_id": thread_id,
-                "message": (
-                    "There are currently no open "
-                    "Merge Requests."
-                )
-            }
-
-        session["intent"] = "review"
-
-        mr_list = []
-
-        for mr in merge_requests:
-
-            mr_list.append({
-                "mr_iid": mr.get("iid"),
-                "title": mr.get("title", ""),
-                "source_branch": mr.get(
-                    "source_branch",
-                    ""
-                )
-            })
-
-        return {
-            "type": "mr_selection",
-            "thread_id": thread_id,
-            "intent": "review",
-            "message": (
-                "Sure! Which Merge Request "
-                "would you like me to review?"
-            ),
-            "merge_requests": mr_list
-        }
-
-    # ============================================================
-    # CONVERSATIONAL MR SUGGESTION REQUEST
-    # ============================================================
-
-    # Example:
-    # "I want code suggestions for an MR"
-    # "Give me suggestions for a merge request"
-    #
-    # Again, only trigger this when an MR number
-    # was NOT already provided.
-
-    if (
-        "suggest" in lower_message
-        and (
-            "mr" in lower_message
-            or "merge request" in lower_message
-        )
-        and not re.search(
-            r"(?:mr|merge request)\s*!?\d+",
-            lower_message
-        )
-    ):
-
-        merge_requests = get_open_merge_requests()
-
-        if (
-            isinstance(merge_requests, dict)
-            and "error" in merge_requests
-        ):
-            return {
-                "type": "conversation",
-                "thread_id": thread_id,
-                "message": (
-                    "I couldn't retrieve the open "
-                    "Merge Requests."
-                )
-            }
-
-        if not merge_requests:
-
-            return {
-                "type": "conversation",
-                "thread_id": thread_id,
-                "message": (
-                    "There are currently no open "
-                    "Merge Requests."
-                )
-            }
-
-        session["intent"] = "suggestion"
-
-        mr_list = []
-
-        for mr in merge_requests:
-
-            mr_list.append({
-                "mr_iid": mr.get("iid"),
-                "title": mr.get("title", ""),
-                "source_branch": mr.get(
-                    "source_branch",
-                    ""
-                )
-            })
-
-        return {
-            "type": "mr_selection",
-            "thread_id": thread_id,
-            "intent": "suggestion",
-            "message": (
-                "Sure! Which Merge Request would "
-                "you like code suggestions for?"
-            ),
-            "merge_requests": mr_list
-        }
-
-    # ============================================================
-    # USER SELECTED AN MR FROM THE CONVERSATION
-    # ============================================================
-
-    # Example:
-    #
-    # User:
-    # "I want code suggestions for an MR"
-    #
-    # Bot:
-    # "Which MR?"
-    #
-    # User:
-    # "18"
-    #
-    # The session remembers that the user wanted
-    # a suggestion, so 18 means MR !18.
-
-    if message.isdigit() and session.get("intent"):
-
-        mr_iid = int(message)
-
-        intent = session.get("intent")
-
-        # Clear the pending intent because the user
-        # has now selected the MR.
-        session.pop("intent", None)
-
-        # --------------------------------------------------------
-        # REVIEW SELECTED MR
-        # --------------------------------------------------------
-
-        if intent == "review":
-
-            changes = get_merge_request_changes(
-                mr_iid
-            )
-
-            if "changes" not in changes:
-
-                return {
-                    "type": "review",
-                    "thread_id": thread_id,
-                    "mr_iid": mr_iid,
-                    "review": changes.get(
-                        "message",
-                        (
-                            "Unable to retrieve "
-                            "Merge Request changes."
-                        )
-                    )
-                }
-
-            if not changes["changes"]:
-
-                return {
-                    "type": "review",
-                    "thread_id": thread_id,
-                    "mr_iid": mr_iid,
-                    "review": (
-                        "No changes found in this "
-                        "Merge Request."
-                    )
-                }
-
-            diff_text = ""
-
-            for change in changes["changes"]:
-
-                diff_text += (
-                    f"\nFile: "
-                    f"{change.get('new_path', 'Unknown')}\n"
-                    f"{change.get('diff', '')}\n"
-                )
-
-            review = review_code(
-                diff_text
-            )
-
-            return {
-                "type": "review",
-                "thread_id": thread_id,
-                "mr_iid": mr_iid,
-                "review": review
-            }
-
-        # --------------------------------------------------------
-        # SUGGESTIONS FOR SELECTED MR
-        # --------------------------------------------------------
-
-        if intent == "suggestion":
-
-            files = get_merge_request_source_files(
-                mr_iid
-            )
-
-            if (
-                isinstance(files, dict)
-                and "error" in files
-            ):
-
-                return {
-                    "type": "suggestion",
-                    "thread_id": thread_id,
-                    "mr_iid": mr_iid,
-                    "suggestions": [],
-                    "message": files.get(
-                        "error",
-                        (
-                            "Unable to retrieve "
-                            "Merge Request files."
-                        )
-                    )
-                }
-
-            if not files:
-
-                return {
-                    "type": "suggestion",
-                    "thread_id": thread_id,
-                    "mr_iid": mr_iid,
-                    "suggestions": []
-                }
-
-            # ----------------------------------------------------
-            # Get MR context from Elasticsearch
-            # ----------------------------------------------------
-
-            mr_details = make_gitlab_request(
-                f"merge_requests/{mr_iid}"
-            )
-
-            if (
-                isinstance(mr_details, dict)
-                and "error" not in mr_details
-            ):
-
-                mr_context = (
-                    get_mr_context_for_suggestions(
-                        mr_iid,
-                        mr_details.get(
-                            "title",
-                            ""
-                        ),
-                        mr_details.get(
-                            "description",
-                            ""
-                        )
-                    )
-                )
-
-            else:
-
-                mr_context = []
-
-            print(
-                "\n🔍 Searching Elasticsearch "
-                "for related Merge Requests..."
-            )
-
-            print(
-                f"✅ Found {len(mr_context)} "
-                "related Merge Requests."
-            )
-
-            # ----------------------------------------------------
-            # Generate AI suggestions
-            # ----------------------------------------------------
-
-            print(
-                "\n🤖 Generating "
-                "context-aware AI code suggestions..."
-            )
-
-            suggestion_text = suggest_code(
-                files,
-                mr_context
-            )
-
-            # ----------------------------------------------------
-            # Parse AI JSON response
-            # ----------------------------------------------------
-
-            try:
-
-                json_start = (
-                    suggestion_text.find("{")
-                )
-
-                json_end = (
-                    suggestion_text.rfind("}") + 1
-                )
-
-                if (
-                    json_start == -1
-                    or json_end == 0
-                ):
-                    raise ValueError(
-                        "No JSON object found"
-                    )
-
-                suggestion_data = json.loads(
-                    suggestion_text[
-                        json_start:json_end
-                    ]
-                )
-
-            except (
-                json.JSONDecodeError,
-                ValueError
-            ):
-
-                return {
-                    "type": "suggestion",
-                    "thread_id": thread_id,
-                    "mr_iid": mr_iid,
-                    "suggestions": [],
-                    "message": (
-                        "AI returned an invalid "
-                        "suggestion format."
-                    ),
-                    "raw_response": suggestion_text
-                }
-
-            return {
-                "type": "suggestion",
-                "thread_id": thread_id,
-                "mr_iid": mr_iid,
-                "suggestions": (
-                    suggestion_data.get(
-                        "suggestions",
-                        []
-                    )
-                )
-            }
-
-    # ============================================================
-    # DIRECT AI CODE REVIEW REQUEST
-    # ============================================================
-
-    # Supports:
-    # "review mr 18"
-    # "review MR !18"
-
-    review_match = re.search(
-        r"(?:review\s+)?(?:mr|merge request)\s*!?(\d+)",
-        lower_message
-    )
-
-    if (
-        "review" in lower_message
-        and review_match
-    ):
-
-        mr_iid = int(
-            review_match.group(1)
-        )
-
-        changes = get_merge_request_changes(
-            mr_iid
-        )
-
-        if "changes" not in changes:
-
-            return {
-                "type": "review",
-                "thread_id": thread_id,
-                "mr_iid": mr_iid,
-                "review": changes.get(
-                    "message",
-                    (
-                        "Unable to retrieve "
-                        "Merge Request changes."
-                    )
-                )
-            }
-
-        if not changes["changes"]:
-
-            return {
-                "type": "review",
-                "thread_id": thread_id,
-                "mr_iid": mr_iid,
-                "review": (
-                    "No changes found in this "
-                    "Merge Request."
-                )
-            }
-
-        diff_text = ""
-
-        for change in changes["changes"]:
-
-            diff_text += (
-                f"\nFile: "
-                f"{change.get('new_path', 'Unknown')}\n"
-                f"{change.get('diff', '')}\n"
-            )
-
-        review = review_code(
-            diff_text
-        )
-
-        return {
-            "type": "review",
-            "thread_id": thread_id,
-            "mr_iid": mr_iid,
-            "review": review
-        }
-
-    # ============================================================
-    # DIRECT AI CODE SUGGESTION REQUEST
-    # ============================================================
-
-    # Supports:
-    # "suggest for mr 18"
-    # "give me suggestions for MR !18"
-
-    suggestion_match = re.search(
-        r"(?:mr|merge request)\s*!?(\d+)",
-        lower_message
-    )
-
-    if (
-        "suggest" in lower_message
-        and suggestion_match
-    ):
-
-        mr_iid = int(
-            suggestion_match.group(1)
-        )
-
-        # --------------------------------------------------------
-        # Get actual source files
-        # --------------------------------------------------------
-
-        files = get_merge_request_source_files(
-            mr_iid
-        )
-
-        if (
-            isinstance(files, dict)
-            and "error" in files
-        ):
-
-            return {
-                "type": "suggestion",
-                "thread_id": thread_id,
-                "mr_iid": mr_iid,
-                "suggestions": [],
-                "message": files.get(
-                    "error",
-                    (
-                        "Unable to retrieve "
-                        "Merge Request files."
-                    )
-                )
-            }
-
-        if not files:
-
-            return {
-                "type": "suggestion",
-                "thread_id": thread_id,
-                "mr_iid": mr_iid,
-                "suggestions": []
-            }
-
-        # --------------------------------------------------------
-        # Get Elasticsearch context
-        # --------------------------------------------------------
-
-        mr_details = make_gitlab_request(
-            f"merge_requests/{mr_iid}"
-        )
-
-        if (
-            isinstance(mr_details, dict)
-            and "error" not in mr_details
-        ):
-
-            mr_context = (
-                get_mr_context_for_suggestions(
-                    mr_iid,
-                    mr_details.get(
-                        "title",
-                        ""
-                    ),
-                    mr_details.get(
-                        "description",
-                        ""
-                    )
-                )
-            )
-
-        else:
-
-            mr_context = []
-
-        print(
-            "\n🔍 Searching Elasticsearch "
-            "for related Merge Requests..."
-        )
-
-        print(
-            f"✅ Found {len(mr_context)} "
-            "related Merge Requests."
-        )
-
-        # --------------------------------------------------------
-        # Generate suggestions
-        # --------------------------------------------------------
-
-        suggestion_text = suggest_code(
-            files,
-            mr_context
-        )
-
-        # --------------------------------------------------------
-        # Parse AI response
-        # --------------------------------------------------------
-
-        try:
-
-            json_start = (
-                suggestion_text.find("{")
-            )
-
-            json_end = (
-                suggestion_text.rfind("}") + 1
-            )
-
-            if (
-                json_start == -1
-                or json_end == 0
-            ):
-                raise ValueError(
-                    "No JSON object found"
-                )
-
-            suggestion_data = json.loads(
-                suggestion_text[
-                    json_start:json_end
-                ]
-            )
-
-        except (
-            json.JSONDecodeError,
-            ValueError
-        ):
-
-            return {
-                "type": "suggestion",
-                "thread_id": thread_id,
-                "mr_iid": mr_iid,
-                "suggestions": [],
-                "message": (
-                    "AI returned an invalid "
-                    "suggestion format."
-                ),
-                "raw_response": suggestion_text
-            }
-
-        return {
-            "type": "suggestion",
-            "thread_id": thread_id,
-            "mr_iid": mr_iid,
-            "suggestions": (
-                suggestion_data.get(
-                    "suggestions",
-                    []
-                )
-            )
-        }
-
-    # ============================================================
-    # EXISTING LANGGRAPH CREATION WORKFLOW
-    # ============================================================
-
-    config = {
-        "configurable": {
-            "thread_id": thread_id
-        }
-    }
-
-    print(
-        "\n========== WORKFLOW CONTEXT =========="
-    )
-
-    print(
-        "User:",
-        username
-    )
-
-    print(
-        "Project ID:",
-        project_id
-    )
-
-    print(
-        "Default branch:",
-        default_branch
-    )
-
-    print(
-        "======================================\n"
-    )
-    print("\n========== WORKFLOW CONTEXT ==========")
-    print("User:", username)
-    print("Project ID:", project_id)
-    print("Default branch:", default_branch)
-    print("======================================\n")
-    result = graph.invoke(
-        {
-            "username": username,
-
-            "gitlab_project_id": (
-                project_id
-            ),
-
-            "gitlab_default_branch": (
-                default_branch
-            ),
-
-            "user_request": message
-        },
-        config=config
-    )
-
-    # ============================================================
-    # LANGGRAPH HUMAN APPROVAL
-    # ============================================================
-
-    interrupts = result.get(
-        "__interrupt__",
-        []
-    )
-
-    if interrupts:
-        approval_request = interrupts[0].value
-
-        return {
-            "status": "waiting_for_approval",
-            "thread_id": thread_id,
-            "analysis": approval_request["analysis"],
-            "branch_name": approval_request["branch_name"],
-            "commit_message": approval_request["commit_message"],
-            "mr_title": approval_request["mr_title"],
-            "generated_code": approval_request.get(
-                "generated_code",
-                ""
-            )
-        }
-
-    return {
-        "status": "completed",
-        "thread_id": thread_id,
-        "result": result
-    }
-@app.post("/chat/decision")
-async def chat_decision(
-    request: ChatDecisionRequest,
-    username: str = Depends(get_current_user)
-):
-
-    config = {
-        "configurable": {
-            "thread_id": request.thread_id
-        }
-    }
-
-    state_update = {}
-
-    if (
-        request.approved
-        and request.branch_name
-    ):
-
-        state_update["branch_name"] = (
-            request.branch_name
-        )
-
-        state_update["use_existing_branch"] = (
-            request.use_existing_branch
-        )
-
-    result = graph.invoke(
-        Command(
-            update=state_update,
-            resume=request.approved
-        ),
-        config=config
-    )
-
-    if request.approved:
-
-        return {
-            "status": "completed",
-            "thread_id": request.thread_id,
-            "mr_url": result.get(
-                "mr_url",
-                ""
-            )
-        }
-
-    return {
-        "status": "rejected",
-        "thread_id": request.thread_id,
-        "message": (
-            "Workflow rejected by user."
-        )
-    }
-@app.post("/webhook/gitlab")
-async def gitlab_webhook(payload: dict):
-
-    print("\n========== GITLAB WEBHOOK ==========")
-
-    event_type = payload.get("object_kind")
-    project_name = payload.get("project", {}).get("name")
-    branch = payload.get("ref", "").replace("refs/heads/", "")
-    commit_sha = payload.get("after")
-    user_name = payload.get("user_name")
-
-    print("Event type:", event_type)
-    print("Project:", project_name)
-    print("Branch:", branch)
-    print("Commit SHA:", commit_sha)
-    print("User:", user_name)
-
-    # ============================================================
-    # IGNORE COMMITS CREATED BY "ACCEPT SUGGESTION"
-    # ============================================================
-
-    commits = payload.get("commits", [])
-
-    for commit in commits:
-
-        commit_message = commit.get("message", "")
-
-        if commit_message.startswith("Apply AI code suggestion"):
-
-            print(
-                "📌 AI suggestion commit detected."
-            )
-
-            print(
-                "ℹ️ Push detected from accepted suggestion."
-            )
-
-            print(
-                "ℹ️ AI review/suggestion will NOT be triggered."
-            )
-
-            return {
-                "status": "ignored",
-                "reason": "AI suggestion commit",
-                "commit_sha": commit_sha
-            }
-
-    # ============================================================
-    # PUSH EVENT
-    # ============================================================
-
-    if event_type == "push":
-
-        print("\n📌 Push event received.")
-
-        # --------------------------------------------------------
-        # Find open Merge Request for this branch
-        # --------------------------------------------------------
-
-        print(
-            "\n🔍 Finding open Merge Request..."
-        )
-
-        merge_requests = get_merge_request_for_branch(branch)
-
-        if (
-            not isinstance(merge_requests, list)
-            or not merge_requests
-        ):
-
-            print(
-                "⚠️ No open Merge Request found for this branch."
-            )
-
-            return {
-                "status": "received",
-                "message": (
-                    "No open Merge Request found for this branch."
-                ),
-                "branch": branch,
-                "commit_sha": commit_sha
-            }
-
-        mr = merge_requests[0]
-        mr_iid = mr["iid"]
-
-        print(
-            f"✅ Found Merge Request: !{mr_iid}"
-        )
-
-        # --------------------------------------------------------
-        # Get actual source files from MR source branch
-        # --------------------------------------------------------
-
-        print(
-            "\n🔍 Getting current source files..."
-        )
-
-        file_contents = get_merge_request_source_files(
-            mr_iid
-        )
-
-        if (
-            isinstance(file_contents, dict)
-            and "error" in file_contents
-        ):
-
-            print(
-                "❌ Failed to get source files:"
-            )
-            print(file_contents)
-
-            return {
-                "status": "error",
-                "message": "Failed to get source files.",
-                "details": file_contents
-            }
-
-        if not file_contents:
-
-            print(
-                "⚠️ No source files found."
-            )
-
-            return {
-                "status": "received",
-                "message": "No source files found.",
-                "mr_iid": mr_iid
-            }
-
-        # --------------------------------------------------------
-        # Generate AI code suggestions
-        #
-        # PUSH EVENT:
-        # Do NOT use Elasticsearch MR context here.
-        # --------------------------------------------------------
-
-        print(
-            "\n🤖 Generating AI code suggestions for push..."
-        )
-
-        suggestion_response = suggest_code(
-            file_contents,
-            []
-        )
-
-        try:
-
-            json_start = suggestion_response.find("{")
-            json_end = suggestion_response.rfind("}") + 1
-
-            if json_start == -1 or json_end == 0:
-                raise ValueError(
-                    "No JSON object found in AI response."
-                )
-
-            suggestion_data = json.loads(
-                suggestion_response[
-                    json_start:json_end
-                ]
-            )
-
-            suggestions = suggestion_data.get(
-                "suggestions",
-                []
-            )
-
-        except (
-            json.JSONDecodeError,
-            ValueError
-        ):
-
-            suggestions = []
-
-        # --------------------------------------------------------
-        # No suggestions
-        # --------------------------------------------------------
-
-        if not suggestions:
-
-            print(
-                "ℹ️ No meaningful code improvements suggested."
-            )
-
-            return {
-                "status": "completed",
-                "event_type": "push",
-                "mr_iid": mr_iid,
-                "suggestions": []
-            }
-
-        # --------------------------------------------------------
-        # Post suggestions to GitLab MR
-        # --------------------------------------------------------
-
-        suggestion_text = (
-            "## 🤖 AI Code Suggestions\n\n"
-        )
-
-        for index, suggestion in enumerate(
-            suggestions,
-            start=1
-        ):
-
-            suggestion_text += (
-                f"### Suggestion {index}\n\n"
-                f"**File:** "
-                f"{suggestion.get('file', 'Unknown')}\n\n"
-                f"**Current Code:**\n"
-                f"```python\n"
-                f"{suggestion.get('current_code', '')}\n"
-                f"```\n\n"
-                f"**Suggested Code:**\n"
-                f"```python\n"
-                f"{suggestion.get('suggested_code', '')}\n"
-                f"```\n\n"
-                f"**Reason:** "
-                f"{suggestion.get('reason', '')}\n\n"
-                "---\n\n"
-            )
-
-        print(
-            "\n💬 Posting AI suggestions to GitLab..."
-        )
-
-        post_result = post_ai_suggestion(
-            mr_iid,
-            suggestion_text
-        )
-
-        print(
-            "GitLab suggestion response:"
-        )
-        print(post_result)
-
-        print(
-            "====================================\n"
-        )
-
-        return {
-            "status": "suggestions_generated",
-            "event_type": "push",
-            "project": project_name,
-            "branch": branch,
-            "commit_sha": commit_sha,
-            "mr_iid": mr_iid,
-            "suggestions": suggestions
-        }
-
-    # ============================================================
-    # MERGE REQUEST EVENT
-    # ============================================================
-
-    if event_type == "merge_request":
-
-        attributes = payload.get(
-            "object_attributes",
-            {}
-        )
-
-        mr_iid = attributes.get("iid")
-        action = attributes.get("action")
-        mr_title = attributes.get("title", "")
-        mr_description = attributes.get("description", "")
-
-        print(
-            f"\n📌 Merge Request event received: !{mr_iid}"
-        )
-
-        print(
-            f"Action: {action}"
-        )
-
-        if not mr_iid:
-
-            return {
-                "status": "error",
-                "message": (
-                    "Merge Request IID not found."
-                )
-            }
-
-        # --------------------------------------------------------
-        # Get actual source files
-        # --------------------------------------------------------
-
-        print(
-            "\n🔍 Getting current source files..."
-        )
-
-        file_contents = get_merge_request_source_files(
-            mr_iid
-        )
-
-        if (
-            isinstance(file_contents, dict)
-            and "error" in file_contents
-        ):
-
-            return {
-                "status": "error",
-                "message": "Failed to get MR source files.",
-                "details": file_contents
-            }
-
-        if not file_contents:
-
-            return {
-                "status": "completed",
-                "event_type": "merge_request",
-                "mr_iid": mr_iid,
-                "suggestions": []
-            }
-
-        # --------------------------------------------------------
-        # Get related Merge Request context
-        #
-        # MR CODE SUGGESTION:
-        # This is where Elasticsearch context is used.
-        # --------------------------------------------------------
-
-        print(
-            "\n🔍 Searching Elasticsearch for related Merge Requests..."
-        )
-
-        mr_context = get_mr_context_for_suggestions(
-            mr_iid,
-            mr_title,
-            mr_description
-        )
-
-        print(
-            f"✅ Found {len(mr_context)} related Merge Requests."
-        )
-
-        # --------------------------------------------------------
-        # Generate AI code suggestions
-        # --------------------------------------------------------
-
-        print(
-            "\n🤖 Generating context-aware AI code suggestions..."
-        )
-
-        suggestion_response = suggest_code(
-            file_contents,
-            mr_context
-        )
-
-        try:
-
-            json_start = suggestion_response.find("{")
-            json_end = suggestion_response.rfind("}") + 1
-
-            if json_start == -1 or json_end == 0:
-                raise ValueError(
-                    "No JSON object found in AI response."
-                )
-
-            suggestion_data = json.loads(
-                suggestion_response[
-                    json_start:json_end
-                ]
-            )
-
-            suggestions = suggestion_data.get(
-                "suggestions",
-                []
-            )
-
-        except (
-            json.JSONDecodeError,
-            ValueError
-        ):
-
-            suggestions = []
-
-        # --------------------------------------------------------
-        # No suggestions
-        # --------------------------------------------------------
-
-        if not suggestions:
-
-            print(
-                "ℹ️ No meaningful code improvements suggested."
-            )
-
-            return {
-                "status": "completed",
-                "event_type": "merge_request",
-                "mr_iid": mr_iid,
-                "suggestions": []
-            }
-
-        # --------------------------------------------------------
-        # Post suggestions to GitLab MR
-        # --------------------------------------------------------
-
-        suggestion_text = (
-            "## 🤖 AI Code Suggestions\n\n"
-        )
-
-        for index, suggestion in enumerate(
-            suggestions,
-            start=1
-        ):
-
-            suggestion_text += (
-                f"### Suggestion {index}\n\n"
-                f"**File:** "
-                f"{suggestion.get('file', 'Unknown')}\n\n"
-                f"**Current Code:**\n"
-                f"```python\n"
-                f"{suggestion.get('current_code', '')}\n"
-                f"```\n\n"
-                f"**Suggested Code:**\n"
-                f"```python\n"
-                f"{suggestion.get('suggested_code', '')}\n"
-                f"```\n\n"
-                f"**Reason:** "
-                f"{suggestion.get('reason', '')}\n\n"
-                "---\n\n"
-            )
-
-        print(
-            "\n💬 Posting AI suggestions to GitLab..."
-        )
-
-        post_result = post_ai_suggestion(
-            mr_iid,
-            suggestion_text
-        )
-
-        print(
-            "GitLab suggestion response:"
-        )
-        print(post_result)
-
-        print(
-            "====================================\n"
-        )
-
-        return {
-            "status": "suggestions_generated",
-            "event_type": "merge_request",
-            "project": project_name,
-            "mr_iid": mr_iid,
-            "suggestions": suggestions
-        }
-
-    # ============================================================
-    # OTHER EVENTS
-    # ============================================================
-
-    print(
-        f"ℹ️ Ignoring unsupported event type: {event_type}"
-    )
-
-    return {
-        "status": "ignored",
-        "event_type": event_type
-    }
-
-@app.post("/login")
-async def login_user(user: LoginRequest):
-
-    if not verify_user(
-        user.username,
-        user.password
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid username or password"
-        )
-
-    expiration = datetime.now(
-        timezone.utc
-    ) + timedelta(
-        hours=JWT_EXPIRE_HOURS
-    )
-
-    payload = {
-        "sub": user.username,
-        "exp": expiration
-    }
-
-    token = jwt.encode(
-        payload,
-        JWT_SECRET_KEY,
-        algorithm=JWT_ALGORITHM
-    )
-
-    print("\n========== LOGIN JWT DEBUG ==========")
-    print("JWT_SECRET_KEY:", JWT_SECRET_KEY)
-    print("Generated token:", token)
-    print("=====================================\n")
-
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "username": user.username
-    }
-
-# ============================================================
-# REGISTER USER
-# ============================================================
-
-@app.post("/register")
-async def register_user(
-    request: RegisterRequest
-):
-
-    username = (
-        request.username
-        or ""
-    ).strip()
-
-    password = (
-        request.password
-        or ""
-    )
-
-    gitlab_token = (
-        request.gitlab_token
-        or ""
-    ).strip()
-
-    # ========================================================
-    # BASIC VALIDATION
-    # ========================================================
-
-    if not all(
-        [
-            username,
-            password,
-            gitlab_token
-        ]
-    ):
-
-        raise HTTPException(
-            status_code=400,
-            detail="All fields are required."
-        )
-
-    # ========================================================
-    # CHECK APPLICATION USERNAME
-    # ========================================================
-
-    if user_exists(
-        username
-    ):
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Username already exists. "
-                "Please choose another username."
-            )
-        )
-
-    # ========================================================
-    # VALIDATE GITLAB TOKEN
-    # ========================================================
-
-    try:
-
-        gitlab_response = requests.get(
-            "https://gitlab.com/api/v4/user",
-            headers={
-                "PRIVATE-TOKEN": gitlab_token
-            },
-            timeout=20
-        )
-
-    except requests.RequestException as error:
-
-        print(
-            "GITLAB VALIDATION ERROR:",
-            error
-        )
-
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Unable to connect to GitLab. "
-                "Please try again."
-            )
-        )
-
-    # --------------------------------------------------------
-    # Invalid / expired token
-    # --------------------------------------------------------
-
-    if gitlab_response.status_code == 401:
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Invalid or expired GitLab "
-                "access token."
-            )
-        )
-
-    # --------------------------------------------------------
-    # Other GitLab errors
-    # --------------------------------------------------------
-
-    if gitlab_response.status_code != 200:
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "GitLab authentication failed. "
-                f"GitLab returned status "
-                f"{gitlab_response.status_code}."
-            )
-        )
-
-    # ========================================================
-    # GET AUTHENTICATED GITLAB IDENTITY
-    # ========================================================
-
-    gitlab_user = (
-        gitlab_response.json()
-    )
-
-    actual_gitlab_username = (
-        gitlab_user.get(
-            "username",
-            ""
-        )
-        or ""
-    ).strip()
-
-    if not actual_gitlab_username:
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "GitLab token was valid, but "
-                "the authenticated GitLab username "
-                "could not be determined."
-            )
-        )
-
-    # ========================================================
-    # CREATE USER
-    # ========================================================
-
-    try:
-
-        create_user(
-            username=username,
-            password=password,
-            gitlab_username=(
-                actual_gitlab_username
-            ),
-            gitlab_token=gitlab_token
-        )
-
-    except sqlite3.IntegrityError:
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Username already exists."
-            )
-        )
-
-    except Exception as error:
-
-        print(
-            "USER CREATION ERROR:",
-            error
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Unable to create account."
-            )
-        )
-
-    # ========================================================
-    # SUCCESS
-    # ========================================================
-
-    return {
-        "status": "registered",
-        "username": username,
-        "gitlab_username": (
-            actual_gitlab_username
-        ),
-        "message": (
-            "Registration successful. "
-            "Please log in."
-        )
-    }
-# ============================================================
-# GET MERGE REQUEST APPROVAL HISTORY
-# ============================================================
+def search(query: str, repo: Repository = Depends(selected_repository)):
+    return search_merge_requests(query, repo.project_id)
 
 @app.get("/merge-request/{mr_iid}/approval-history")
-async def get_approval_history(
-    mr_iid: int
-):
-
-    approvals = get_merge_request_approvals(
-        mr_iid
-    )
-
-    return {
-        "mr_iid": mr_iid,
-        "approvals": approvals
-    }
-
-# ============================================================
-# GET LOGGED-IN USER'S GITLAB PROJECTS
-# ============================================================
+def approval_history(mr_iid: int, repo: Repository = Depends(selected_repository)):
+    return {"project_id": repo.project_id, "mr_iid": mr_iid, "approvals": get_merge_request_approvals(mr_iid, repo.project_id)}
 
 @app.get("/gitlab/projects")
-async def get_gitlab_projects(
-    username: str = Depends(get_current_user)
-):
+def projects(username: str = Depends(get_current_user)):
+    token = get_gitlab_token(username)
+    if not token:
+        raise HTTPException(400, "No GitLab token configured.")
+    rows, page = [], 1
+    while True:
+        data, headers = client.api_request("GET", "projects", token, params={"membership": "true", "simple": "true",
+            "per_page": 100, "page": page, "order_by": "last_activity_at", "sort": "desc"})
+        rows.extend(data)
+        following = headers.get("X-Next-Page")
+        if not following:
+            break
+        page = int(following)
+    keys = ("id", "name", "path", "path_with_namespace", "web_url", "default_branch", "http_url_to_repo",
+            "ssh_url_to_repo", "visibility", "last_activity_at")
+    result = [{**{k: row.get(k) for k in keys}, "namespace": (row.get("namespace") or {}).get("full_path")} for row in rows]
+    return {"projects": result, "total_projects": len(result)}
 
-    gitlab_token = get_gitlab_token(
-        username
-    )
 
-    if not gitlab_token:
+def head(mr):
+    value = (mr.get("diff_refs") or {}).get("head_sha") or mr.get("sha")
+    if not value:
+        raise HTTPException(409, "MR revision is not ready; retry after GitLab computes its diff.")
+    return value
 
-        raise HTTPException(
-            status_code=400,
-            detail="No GitLab token found for this user."
-        )
 
-    response = requests.get(
-        "https://gitlab.com/api/v4/projects",
-        headers={
-            "PRIVATE-TOKEN": gitlab_token
-        },
-        params={
-            "membership": "true",
-            "simple": "true",
-            "per_page": 100,
-            "order_by": "last_activity_at",
-            "sort": "desc"
-        },
-        timeout=20
-    )
+def get_file_content_by_ref(file_path, ref_sha, project_id, token):
+    data = client.file_data(file_path, ref_sha, project_id, token)
+    try:
+        return base64.b64decode(data["content"]).decode("utf-8")
+    except (ValueError, UnicodeDecodeError, KeyError):
+        return "(Binary or undecodable file)"
 
-    if response.status_code != 200:
 
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=(
-                "Unable to fetch GitLab projects: "
-                f"{response.text}"
-            )
-        )
+def code_diffs(mr_iid, repo):
+    mr = get_merge_request(mr_iid, repo)
+    refs = mr.get("diff_refs") or {}
+    base, revision = refs.get("base_sha"), head(mr)
+    if not base:
+        raise HTTPException(409, "MR base revision unavailable.")
+    changes = client.pages(f"merge_requests/{mr_iid}/diffs", repo.project_id, repo.token)
+    files = []
+    for change in changes:
+        old, new = change.get("old_path"), change.get("new_path")
+        files.append({**change, "diff_git": change.get("diff", ""),
+            "original_code": None if change.get("new_file") else get_file_content_by_ref(old, base, repo.project_id, repo.token),
+            "modified_code": None if change.get("deleted_file") else get_file_content_by_ref(new, revision, repo.project_id, repo.token)})
+    return {"mr_iid": mr_iid, "project_id": repo.project_id, "title": mr.get("title"), "source_branch": mr.get("source_branch"),
+            "target_branch": mr.get("target_branch"), "base_sha": base, "head_sha": revision, "files": files, "total_files": len(files)}
 
-    projects = response.json()
+@app.get("/merge-request/{mr_iid}/code-diffs")
+def get_code_diffs(mr_iid: int, repo: Repository = Depends(selected_repository)):
+    return code_diffs(mr_iid, repo)
 
-    return {
-        "projects": [
-            {
-                "id": project["id"],
-                "name": project["name"],
-                "path_with_namespace": (
-                    project["path_with_namespace"]
-                ),
-                "web_url": project["web_url"],
-                "default_branch": (
-                    project.get("default_branch")
-                )
-            }
-            for project in projects
-        ]
-    }
+@app.get("/merge-request/{mr_iid}/code-diffs/raw")
+def raw_code(mr_iid: int, file_path: str, version: str = "modified", repo: Repository = Depends(selected_repository)):
+    if version not in ("original", "modified"):
+        raise HTTPException(400, "Version must be original or modified.")
+    data = code_diffs(mr_iid, repo)
+    key = "old_path" if version == "original" else "new_path"
+    for file in data["files"]:
+        if file.get(key) == file_path and file[f"{version}_code"] is not None:
+            return {"file_path": file_path, "version": version, "content": file[f"{version}_code"],
+                    "commit_sha": data["base_sha" if version == "original" else "head_sha"]}
+    raise HTTPException(404, "File is not present in this MR revision.")
+
+
+def save_proposal(repo, mr_iid, revision, kind, **data):
+    proposal_id = str(uuid.uuid4())
+    with state_lock:
+        proposals[proposal_id] = dict(username=repo.username, project_id=repo.project_id, mr_iid=mr_iid,
+            revision=revision, kind=kind, **data)
+    return proposal_id
+
+
+def owned_proposal(proposal_id, repo, mr_iid, kind):
+    item = proposals.get(proposal_id)
+    if not item or (item["username"], item["project_id"], item["mr_iid"], item["kind"]) != (repo.username, repo.project_id, mr_iid, kind):
+        raise HTTPException(404, "Proposal not found for this account/project/MR.")
+    return item
+
+@app.get("/review/{mr_iid}")
+def review_merge_request(mr_iid: int, repo: Repository = Depends(selected_repository)):
+    data = code_diffs(mr_iid, repo)
+    review = review_code("\n".join(f"File: {f['new_path']}\n{f['diff_git']}" for f in data["files"])) if data["files"] else "No changes found."
+    review_id = save_proposal(repo, mr_iid, data["head_sha"], "review", text=review)
+    return {"type": "review", "mr_iid": mr_iid, "review": review, "review_id": review_id, "head_sha": data["head_sha"]}
+
+@app.post("/review/{mr_iid}/post")
+def post_review(mr_iid: int, request: PostReviewRequest, repo: Repository = Depends(selected_repository)):
+    with state_lock:
+        item = owned_proposal(request.review_id, repo, mr_iid, "review")
+        if item.get("result"):
+            return item["result"]
+        if head(get_merge_request(mr_iid, repo)) != item["revision"]:
+            raise HTTPException(409, "Stale review: MR changed. Generate a new review.")
+        result = client.post(f"merge_requests/{mr_iid}/notes", {"body": item["text"]}, repo.project_id, repo.token)
+        if not result.get("id"):
+            raise HTTPException(502, "GitLab did not confirm the posted review.")
+        item["result"] = {"status": "posted", "review": item["text"], "note_id": result["id"]}
+        return item["result"]
+
+@app.get("/suggest/{mr_iid}")
+def suggest_merge_request(mr_iid: int, repo: Repository = Depends(selected_repository)):
+    data = code_diffs(mr_iid, repo)
+    files = [{"file": f["new_path"], "content": f["modified_code"]} for f in data["files"] if f["modified_code"] is not None]
+    context = get_mr_context_for_suggestions(mr_iid, data.get("title", ""), project_id=repo.project_id)
+    if not files:
+        return {"type": "suggestion", "mr_iid": mr_iid, "suggestions": []}
+    raw = suggest_code(files, context)
+    try:
+        suggestions = json.loads(raw[raw.index("{"):raw.rindex("}")+1]).get("suggestions", [])
+    except (ValueError, TypeError):
+        raise HTTPException(502, "AI returned invalid suggestions.") from None
+    by_path = {f["file"]: f["content"] for f in files}
+    accepted = []
+    for item in suggestions:
+        if not isinstance(item, dict):
+            continue
+        path, current, suggested = item.get("file"), item.get("current_code"), item.get("suggested_code")
+        if path not in by_path or not isinstance(current, str) or not current or not isinstance(suggested, str):
+            continue
+        if by_path[path].count(current) != 1:
+            continue
+        item["proposal_id"] = save_proposal(repo, mr_iid, data["head_sha"], "suggestion", file=path,
+            current_code=current, suggested_code=suggested, source_branch=data["source_branch"],
+            content_sha256=hashlib.sha256(by_path[path].encode()).hexdigest())
+        accepted.append(item)
+    return {"type": "suggestion", "mr_iid": mr_iid, "suggestions": accepted}
+
+@app.post("/suggest/{mr_iid}/post")
+def post_suggestion(mr_iid: int, request: PostSuggestionRequest, repo: Repository = Depends(selected_repository)):
+    result = client.post(f"merge_requests/{mr_iid}/notes", {"body": request.suggestion}, repo.project_id, repo.token)
+    if not result.get("id"):
+        raise HTTPException(502, "GitLab did not confirm the note.")
+    return {"status": "posted", "note_id": result["id"]}
+
+@app.post("/suggest/{mr_iid}/accept")
+def accept_suggestion(mr_iid: int, request: AcceptSuggestionRequest, repo: Repository = Depends(selected_repository)):
+    with state_lock:
+        item = owned_proposal(request.proposal_id, repo, mr_iid, "suggestion")
+        if item.get("result"):
+            return item["result"]
+        mr = get_merge_request(mr_iid, repo)
+        if mr.get("source_project_id", repo.project_id) != repo.project_id:
+            raise HTTPException(409, "Fork MR writes require separate source-project authorization.")
+        if head(mr) != item["revision"] or mr["source_branch"] != item["source_branch"]:
+            raise HTTPException(409, "Stale suggestion: regenerate for the current MR revision.")
+        data = client.file_data(item["file"], mr["source_branch"], repo.project_id, repo.token)
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        if (hashlib.sha256(content.encode()).hexdigest() != item["content_sha256"]
+                or content.count(item["current_code"]) != 1 or not data.get("last_commit_id")):
+            raise HTTPException(409, "File changed or replacement is ambiguous; regenerate suggestion.")
+        result = client.post("repository/commits", {"branch": mr["source_branch"],
+            "commit_message": f"Apply AI code suggestion to {item['file']}", "actions": [{"action": "update",
+            "file_path": item["file"], "content": content.replace(item["current_code"], item["suggested_code"], 1),
+            "last_commit_id": data["last_commit_id"]}]}, repo.project_id, repo.token)
+        if not result.get("id"):
+            raise HTTPException(502, "GitLab did not confirm the commit.")
+        item["result"] = {"status": "accepted", "commit_sha": result["id"], "commit_url": result.get("web_url", "")}
+        return item["result"]
+
+
+def session_for(thread_id, username):
+    session = chat_sessions.get(thread_id)
+    if not session or session["username"] != username:
+        raise HTTPException(404, "Thread not found for this account.")
+    return session
+
+
+def workflow_response(result, thread_id):
+    interrupts = result.get("__interrupt__", [])
+    if interrupts:
+        return {"status": "waiting_for_approval", "thread_id": thread_id, **interrupts[0].value}
+    return {"status": "completed", "thread_id": thread_id, "result": result, "mr_url": result.get("mr_url", "")}
+
+@app.post("/chat")
+def chat(request: ChatRequest, username: str = Depends(get_current_user)):
+    with state_lock:
+        thread_id = request.thread_id or str(uuid.uuid4())
+        if request.thread_id:
+            session = session_for(thread_id, username)
+        else:
+            session = {"username": username, "status": "idle"}
+            chat_sessions[thread_id] = session
+        if session["status"] in ("running", "waiting_for_approval", "failed"):
+            raise HTTPException(409, "Resolve this workflow before continuing; use New Chat for a separate workflow.")
+        bound = session.get("project_id")
+        if bound and request.project_id and bound != request.project_id:
+            raise HTTPException(409, "Repository is bound to this thread. Change repository starts a new chat.")
+        project_id = bound or request.project_id
+        if not project_id:
+            if not request.message.strip():
+                raise HTTPException(400, "Enter a development request.")
+            session.setdefault("pending_message", request.message.strip())
+            return {"type": "repository_selection", "thread_id": thread_id,
+                    "message": "Select an authorized GitLab repository to continue your request."}
+        repo = authorize_project(username, project_id)
+        session["project_id"] = project_id
+        message = session.get("pending_message") or request.message.strip()
+        if not message:
+            raise HTTPException(400, "Enter a development request.")
+        session["status"] = "running"
+    try:
+        lower = message.lower()
+        match = re.search(r"(?:mr|merge request)\s*!?(\d+)", lower)
+        intent = "review" if "review" in lower else "suggestion" if "suggest" in lower else None
+        mr_iid = int(match.group(1)) if match else None
+        if message.isdigit() and session.get("intent"):
+            mr_iid, intent = int(message), session["intent"]
+        if intent and (match or "mr" in lower or "merge request" in lower or message.isdigit()):
+            if mr_iid is None:
+                rows = client.pages("merge_requests", project_id, repo.token, {"state": "opened"})
+                session["intent"] = intent
+                response = {"type": "mr_selection", "intent": intent, "message": "Select a Merge Request.",
+                    "merge_requests": [{"mr_iid": r["iid"], "title": r["title"], "source_branch": r["source_branch"]} for r in rows]}
+            else:
+                response = review_merge_request(mr_iid, repo) if intent == "review" else suggest_merge_request(mr_iid, repo)
+                session.pop("intent", None)
+            response["thread_id"] = thread_id
+            next_status = "idle"
+        else:
+            branch = repo.project.get("default_branch")
+            if not branch:
+                raise HTTPException(400, "Initialize a default branch in this repository first.")
+            target = target_path(os.getenv("GENERATED_CODE_FILE", "generated_feature.py"))
+            # Each development request gets a fresh graph state while retaining conversation binding.
+            workflow_id = str(uuid.uuid4())
+            session["workflow_id"] = workflow_id
+            result = graph.invoke({"username": username, "gitlab_project_id": project_id,
+                "gitlab_default_branch": branch, "gitlab_clone_url": repo.project.get("http_url_to_repo", ""),
+                "user_request": message, "thread_id": workflow_id, "target_file": target},
+                config={"configurable": {"thread_id": workflow_id}})
+            response = workflow_response(result, thread_id)
+            response["workflow_id"] = workflow_id
+            next_status = response["status"]
+        response["repository"] = {k: repo.project.get(k) for k in ("id", "name", "path_with_namespace", "default_branch", "http_url_to_repo")}
+        with state_lock:
+            session.pop("pending_message", None)
+            session.update(status=next_status, response=response)
+        return response
+    except Exception:
+        with state_lock:
+            session["status"] = "failed"
+        raise
+
+@app.post("/chat/decision")
+def chat_decision(request: ChatDecisionRequest, username: str = Depends(get_current_user)):
+    with state_lock:
+        session = session_for(request.thread_id, username)
+        if request.project_id != session.get("project_id"):
+            raise HTTPException(409, "Project does not match the thread binding.")
+        authorize_project(username, request.project_id)
+        previous = session.get("decisions", {}).get(request.workflow_id)
+        if previous:
+            return previous
+        if request.workflow_id != session.get("workflow_id"):
+            raise HTTPException(409, "Decision does not match the current workflow proposal.")
+        if session["status"] != "waiting_for_approval":
+            raise HTTPException(409, "Workflow is not awaiting approval; do not retry partial writes.")
+        config = {"configurable": {"thread_id": session["workflow_id"]}}
+        values = graph.get_state(config).values
+        if values.get("username") != username or values.get("gitlab_project_id") != request.project_id:
+            raise HTTPException(403, "Workflow ownership mismatch.")
+        session["status"] = "running"
+    try:
+        update = {}
+        if request.approved and request.branch_name:
+            update = {"branch_name": request.branch_name, "use_existing_branch": request.use_existing_branch}
+        result = graph.invoke(Command(update=update, resume=request.approved), config=config)
+        response = workflow_response(result, request.thread_id) if request.approved else {
+            "status": "rejected", "thread_id": request.thread_id, "message": "Workflow rejected."}
+        response["workflow_id"] = request.workflow_id
+        with state_lock:
+            session.setdefault("decisions", {})[request.workflow_id] = response
+            session.update(status=response["status"], response=response)
+        return response
+    except Exception:
+        with state_lock:
+            session["status"] = "failed"
+        raise
+
+@app.post("/webhook/gitlab")
+def webhook(payload: dict, x_gitlab_token: str | None = Header(default=None),
+            x_gitlab_event_uuid: str | None = Header(default=None)):
+    secret = os.getenv("GITLAB_WEBHOOK_SECRET", "")
+    if not secret or not x_gitlab_token or not hmac.compare_digest(secret, x_gitlab_token):
+        raise HTTPException(401, "Invalid webhook secret.")
+    project_id = (payload.get("project") or {}).get("id")
+    allowed = {v.strip() for v in os.getenv("GITLAB_WEBHOOK_PROJECT_IDS", "").split(",") if v.strip()}
+    if str(project_id) not in allowed:
+        raise HTTPException(403, "Webhook project is not allowlisted.")
+    token = os.getenv("GITLAB_WEBHOOK_TOKEN")
+    if not token:
+        raise HTTPException(503, "Webhook service token is not configured.")
+    event = f"{project_id}:" + (x_gitlab_event_uuid or hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest())
+    with get_connection() as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS webhook_events (event_id TEXT PRIMARY KEY, status TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        inserted = connection.execute("INSERT OR IGNORE INTO webhook_events(event_id,status) VALUES (?, 'processing')", (event,)).rowcount
+    if not inserted:
+        return {"status": "duplicate", "event_id": event}
+    try:
+        if any(c.get("message", "").startswith("Apply AI code suggestion") for c in payload.get("commits", [])):
+            result = {"status": "ignored", "reason": "AI suggestion commit"}
+        else:
+            repo = Repository("webhook", int(project_id), token, {})
+            kind = payload.get("object_kind")
+            if kind == "merge_request":
+                ids = [(payload.get("object_attributes") or {}).get("iid")]
+            elif kind == "push":
+                branch = payload.get("ref", "").removeprefix("refs/heads/")
+                ids = [r["iid"] for r in client.pages("merge_requests", repo.project_id, token, {"source_branch": branch, "state": "opened"})]
+            else:
+                ids = []
+            for mr_iid in filter(None, ids):
+                suggestions = suggest_merge_request(mr_iid, repo)["suggestions"]
+                if suggestions:
+                    post_suggestion(mr_iid, PostSuggestionRequest(suggestion=json.dumps(suggestions, indent=2)), repo)
+            result = {"status": "completed"}
+        with get_connection() as connection:
+            connection.execute("UPDATE webhook_events SET status='completed' WHERE event_id=?", (event,))
+        return result
+    except Exception:
+        with get_connection() as connection:
+            connection.execute("UPDATE webhook_events SET status='failed' WHERE event_id=?", (event,))
+        raise

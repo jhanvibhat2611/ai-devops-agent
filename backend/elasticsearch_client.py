@@ -1,142 +1,64 @@
+"""Project-scoped MR metadata retrieval, not repository-code RAG."""
+import logging
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 
-es = Elasticsearch("http://localhost:9200")
-
-if es.ping():
-    print("✅ Connected to Elasticsearch")
-else:
-    print("❌ Connection Failed")
+es = Elasticsearch("http://localhost:9200", request_timeout=3, max_retries=0)
+INDEX = "gitlab_merge_requests"
 
 
-# Store a merge request in Elasticsearch
-def index_merge_request(document: dict):
+def identity(project_id, mr_iid):
+    if not project_id:
+        raise ValueError("Explicit project identity is required.")
+    return f"{int(project_id)}:{int(mr_iid)}"
 
-    response = es.index(
-        index="gitlab_merge_requests",
-        id=document["mr_id"],
-        document=document
-    )
 
-    return response
+def index_merge_request(document):
+    try:
+        return es.index(index=INDEX, id=identity(document["project_id"], document["mr_id"]), document=document)
+    except Exception:
+        logging.warning("Elasticsearch indexing unavailable")
+        return None
 
-# Search merge requests in Elasticsearch
-def search_merge_requests(query: str):
 
-    response = es.search(
-        index="gitlab_merge_requests",
-        query={
-            "multi_match": {
-                "query": query,
-                "fields": [
-                    "title",
-                    "description",
-                    "author"
-                ]
-            }
-        }
-    )
+update_merge_request = index_merge_request
 
-    results = []
 
-    for hit in response["hits"]["hits"]:
-        results.append(hit["_source"])
+def search_merge_requests(query, project_id):
+    if not project_id:
+        raise ValueError("Explicit project identity is required.")
+    try:
+        response = es.search(index=INDEX, size=10, query={"bool": {
+            "filter": [{"term": {"project_id": int(project_id)}}],
+            "must": [{"multi_match": {"query": query, "fields": ["title", "description", "author"]}}]}})
+        return [hit["_source"] for hit in response["hits"]["hits"]]
+    except Exception:
+        logging.warning("Elasticsearch unavailable; continuing without MR context")
+        return []
 
-    return results
 
-# Check if a merge request already exists
-def merge_request_exists(mr_id: int):
+def merge_request_exists(mr_id, project_id):
+    try:
+        return bool(es.exists(index=INDEX, id=identity(project_id, mr_id)))
+    except Exception:
+        return False
 
-    return es.exists(
-        index="gitlab_merge_requests",
-        id=str(mr_id)
-    )
 
-# Get a merge request from Elasticsearch
-def get_merge_request_from_es(mr_id: int):
+def get_merge_request_from_es(mr_id, project_id):
+    try:
+        return es.get(index=INDEX, id=identity(project_id, mr_id))["_source"]
+    except Exception:
+        return None
 
-    response = es.get(
-        index="gitlab_merge_requests",
-        id=str(mr_id)
-    )
-
-    return response["_source"]
-
-# Update an existing merge request
-def update_merge_request(document: dict):
-
-    response = es.index(
-        index="gitlab_merge_requests",
-        id=str(document["mr_id"]),
-        document=document
-    )
-
-    return response
 
 def bulk_index_merge_requests(documents):
-
-    def document_generator():
-
-        for document in documents:
-
-            yield {
-                "_index": "gitlab_merge_requests",
-                "_id": document["mr_id"],
-                "_source": document
-            }
-
-    success, errors = bulk(
-        client=es,
-        actions=document_generator()
-    )
-
-    print(f"Successfully indexed {success} merge requests.")
-
-    if errors:
-        print(errors)
-
-def get_mr_context_for_suggestions(
-    mr_iid: int,
-    title: str,
-    description: str = ""
-):
-
-    query = f"{title} {description}".strip()
-
-    if not query:
-        return []
-
     try:
+        return bulk(es, [{"_index": INDEX, "_id": identity(d["project_id"], d["mr_id"]), "_source": d} for d in documents])
+    except Exception:
+        logging.warning("Elasticsearch synchronization unavailable")
+        return None
 
-        results = search_merge_requests(query)
 
-        # Do not use the current MR as its own context
-        filtered_results = []
-
-        for mr in results:
-
-            if str(mr.get("mr_id")) == str(mr_iid):
-                continue
-
-            filtered_results.append(mr)
-
-        return filtered_results
-
-    except Exception as e:
-
-        print(
-            "❌ Failed to retrieve MR context:",
-            e
-        )
-
-        return []
-# sample_document = {
-#     "mr_id": 2,
-#     "title": "Implement Elasticsearch",
-#     "author": "Jhanvi",
-#     "status": "open"
-# }
-#
-# response = index_merge_request(sample_document)
-
-# print(response)
+def get_mr_context_for_suggestions(mr_iid, title, description="", *, project_id):
+    return [mr for mr in search_merge_requests(f"{title} {description or ''}", project_id)
+            if str(mr.get("mr_id")) != str(mr_iid)][:3]

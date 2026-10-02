@@ -1,10 +1,13 @@
 import flet as ft
 
-from api import review_merge_request, suggest_merge_request
+from api import RepositoryAPI
 
 
 def review_view(page: ft.Page):
 
+    api = RepositoryAPI(page)
+    review_merge_request = api.review_merge_request
+    suggest_merge_request = api.suggest_merge_request
     mr_id = ft.TextField(
         label="Merge Request ID",
         width=250

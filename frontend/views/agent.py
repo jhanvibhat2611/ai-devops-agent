@@ -1,1232 +1,193 @@
+"""Agent conversation with inline repository selection and explicit approvals."""
+import json
 import flet as ft
-
-from api import (
-    start_chat,
-    send_chat_decision,
-    post_ai_review,
-    post_ai_suggestion,
-    accept_ai_suggestion,
-    get_branches
-)
+from api import RepositoryAPI, get_gitlab_projects
 
 
 def agent_view(page):
-    token = getattr(page, "auth_token", None)
-    username = getattr(page, "username", None)
-    messages = ft.Column(
-        scroll=ft.ScrollMode.AUTO,
-        expand=True,
-        spacing=10
-    )
+    api = RepositoryAPI(page)
+    messages = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True, spacing=10)
+    input_box = ft.TextField(hint_text="Ask the AI DevOps Agent...", expand=True)
+    active = ft.Text()
+    thread_id = None
+    busy = False
+    awaiting = False
+    pending = ""
 
-    input_box = ft.TextField(
-        hint_text="Ask the AI DevOps Agent...",
-        expand=True
-    )
+    def update_active():
+        active.value = "Repository: " + (getattr(page, "gitlab_project_name", None) or "not selected")
 
-    # ============================================================
-    # FRONTEND STATE
-    # ============================================================
+    def add(text):
+        messages.controls.append(ft.Text(str(text), selectable=True))
 
-    current_thread_id = None
-    current_intent = None
-    selected_branch_field = None
-    existing_branch_dropdown = None
+    def locked(value):
+        nonlocal busy
+        busy = value
+        input_box.disabled = value or awaiting
+        change_button.disabled = value or awaiting
+        new_button.disabled = value or awaiting
+        send_button.disabled = value or awaiting
+        page.update()
 
-    # ============================================================
-    # RESET AGENT STATE
-    # ============================================================
+    def result_message(result, success):
+        add(success if result.get("status") in ("posted", "accepted") else result.get("message", "Operation failed."))
+        page.update()
 
-    def reset_agent_state():
+    def repository_picker():
+        result = get_gitlab_projects(page.auth_token)
+        if result.get("error"):
+            add(result["message"])
+            messages.controls.append(ft.TextButton("Retry repository lookup", on_click=lambda e: repository_picker()))
+            page.update()
+            return
+        projects = result.get("projects", [])
+        if not projects:
+            add("No accessible repositories found. Check your GitLab membership and token.")
+            page.update()
+            return
+        dropdown = ft.Dropdown(label="GitLab repository", options=[ft.dropdown.Option(str(p["id"]), p.get("path_with_namespace") or p["name"]) for p in projects])
+        def select(e):
+            nonlocal pending
+            project = next((p for p in projects if str(p["id"]) == dropdown.value), None)
+            if project is None:
+                add("Choose a repository first.")
+                page.update()
+                return
+            page.gitlab_project_id = project["id"]
+            page.gitlab_project_name = project.get("path_with_namespace") or project["name"]
+            page.gitlab_default_branch = project.get("default_branch")
+            page.gitlab_clone_url = project.get("http_url_to_repo")
+            update_active()
+            dropdown.disabled = True
+            select_button.disabled = True
+            locked(True)
+            try:
+                response = api.start_chat(pending, thread_id)
+                if response.get("error"):
+                    dropdown.disabled = False
+                    select_button.disabled = False
+                else:
+                    pending = ""
+                handle(response)
+            finally:
+                locked(False)
+        select_button = ft.ElevatedButton("Use repository and continue", on_click=select)
+        messages.controls.append(ft.Column([dropdown, select_button]))
+        page.update()
 
-        nonlocal current_thread_id
-        nonlocal current_intent
-        nonlocal selected_branch_field
-        nonlocal existing_branch_dropdown
+    def handle(response):
+        nonlocal thread_id, awaiting
+        if response.get("error"):
+            add(response.get("message", "Request failed."))
+            page.update()
+            return
+        thread_id = response.get("thread_id", thread_id)
+        project = response.get("repository")
+        if project:
+            page.gitlab_project_id = project["id"]
+            page.gitlab_project_name = project.get("path_with_namespace") or project["name"]
+            page.gitlab_default_branch = project.get("default_branch")
+            page.gitlab_clone_url = project.get("http_url_to_repo")
+            update_active()
+        kind = response.get("type")
+        if kind == "repository_selection":
+            add(response["message"])
+            repository_picker()
+        elif kind == "mr_selection":
+            add(response.get("message", "Select an MR."))
+            for mr in response.get("merge_requests", []):
+                def select_mr(e, iid=mr["mr_iid"]):
+                    locked(True)
+                    try:
+                        handle(api.start_chat(str(iid), thread_id))
+                    finally:
+                        locked(False)
+                messages.controls.append(ft.TextButton(f"!{mr['mr_iid']} — {mr['title']}", on_click=select_mr))
+        elif kind == "review":
+            add(response.get("review", "No review returned."))
+            def post(e):
+                result_message(api.post_ai_review(response["mr_iid"], response["review_id"]), "Review posted to GitLab.")
+            messages.controls.append(ft.ElevatedButton("Post this review", on_click=post))
+        elif kind == "suggestion":
+            for suggestion in response.get("suggestions", []):
+                add(f"File: {suggestion['file']}\nCurrent code:\n{suggestion['current_code']}\nSuggested code:\n{suggestion['suggested_code']}\nReason: {suggestion.get('reason', '')}")
+                def accept(e, proposal=suggestion["proposal_id"], iid=response["mr_iid"]):
+                    result_message(api.accept_ai_suggestion(iid, proposal), "Suggestion committed to the MR source branch.")
+                def post(e, suggestion=suggestion, iid=response["mr_iid"]):
+                    result_message(api.post_ai_suggestion(iid, json.dumps(suggestion, indent=2)), "Suggestion posted.")
+                messages.controls.append(ft.Row([ft.ElevatedButton("Accept suggestion", on_click=accept),
+                    ft.TextButton("Post suggestion", on_click=post), ft.TextButton("Reject", on_click=lambda e: result_message({"message": "Suggestion rejected; no changes made."}, ""))]))
+            if not response.get("suggestions"):
+                add("No applicable suggestions returned.")
+        elif response.get("status") == "waiting_for_approval":
+            awaiting = True
+            add(f"Target file: {response['target_file']}\nAnalysis: {response['analysis']}\nCommit: {response['commit_message']}\nMR: {response['mr_title']}\nProposed code:\n{response.get('generated_code', '')}")
+            branch = ft.TextField(label="New branch name", value=response.get("branch_name", ""))
+            branches = api.get_branches()
+            if isinstance(branches, dict):
+                add(branches.get("message", "Unable to load branches."))
+                branches = []
+            existing = ft.Dropdown(label="Or choose an existing branch", options=[ft.dropdown.Option(b["name"]) for b in branches])
+            proposal_thread = thread_id
+            def decision(e, approved):
+                nonlocal awaiting
+                approve_button.disabled = reject_button.disabled = True
+                locked(True)
+                result = api.send_chat_decision(proposal_thread, response["workflow_id"], approved, existing.value or branch.value, bool(existing.value))
+                if result.get("error"):
+                    add(result.get("message", "Decision failed. Inspect backend status before retrying."))
+                    approve_button.disabled = reject_button.disabled = False
+                else:
+                    awaiting = False
+                    handle(result)
+                locked(False)
+            approve_button = ft.ElevatedButton("Approve", on_click=lambda e: decision(e, True))
+            reject_button = ft.OutlinedButton("Reject", on_click=lambda e: decision(e, False))
+            messages.controls.append(ft.Column([branch, existing, ft.Row([approve_button, reject_button])]))
+        else:
+            result = response.get("result", {})
+            if response.get("mr_url"):
+                add("Merge Request created: " + response["mr_url"])
+            elif response.get("status") == "rejected":
+                add("Workflow rejected. No branch or MR created.")
+            else:
+                for key in ("validation_message", "analysis", "test_result", "security_report"):
+                    if result.get(key):
+                        add(f"{key.replace('_', ' ').title()}: {result[key]}")
+                if not result:
+                    add(response.get("message", "Request completed."))
+        page.update()
 
-        current_thread_id = None
-        current_intent = None
+    def send(e):
+        nonlocal pending
+        if busy or awaiting or not (input_box.value or "").strip():
+            return
+        pending = input_box.value.strip()
+        add("You: " + pending)
+        input_box.value = ""
+        locked(True)
+        try:
+            handle(api.start_chat(pending, thread_id))
+        finally:
+            locked(False)
 
-        selected_branch_field = None
-        existing_branch_dropdown = None
-
+    def reset(e, change=False):
+        nonlocal thread_id, pending
+        if busy or awaiting:
+            return
+        thread_id, pending = None, ""
         messages.controls.clear()
-        input_box.value = ""
-
+        if change:
+            for name in ("gitlab_project_id", "gitlab_project_name", "gitlab_default_branch", "gitlab_clone_url"):
+                setattr(page, name, None)
+            add("Enter a request; choose its repository inline.")
+        update_active()
         page.update()
 
-    # ============================================================
-    # ADD MESSAGE
-    # ============================================================
-
-    def add_message(
-        text,
-        is_user=False
-    ):
-
-        messages.controls.append(
-            ft.Container(
-                content=ft.Text(
-                    text,
-                    size=15
-                ),
-                padding=10,
-                border_radius=10,
-                bgcolor=(
-                    ft.Colors.BLUE_100
-                    if is_user
-                    else ft.Colors.GREY_200
-                ),
-                alignment=(
-                    ft.alignment.Alignment(1, 0)
-                    if is_user
-                    else ft.alignment.Alignment(-1, 0)
-                )
-            )
-        )
-
-    # ============================================================
-    # SEND MESSAGE
-    # ============================================================
-
-    def send_message(e):
-
-        nonlocal current_thread_id
-        nonlocal current_intent
-
-        message = input_box.value.strip()
-
-        if not message:
-            return
-
-        # --------------------------------------------------------
-        # Show user message
-        # --------------------------------------------------------
-
-        add_message(
-            f"You: {message}",
-            is_user=True
-        )
-
-        input_box.value = ""
-
-        page.update()
-
-        # --------------------------------------------------------
-        # Send request to backend
-        # --------------------------------------------------------
-
-        response = start_chat(
-            message,
-            current_thread_id,
-            token=page.auth_token,
-            project_id=page.gitlab_project_id,
-            default_branch=page.gitlab_default_branch
-        )
-
-        # --------------------------------------------------------
-        # Save intent
-        # --------------------------------------------------------
-
-        if response.get("intent"):
-
-            current_intent = response["intent"]
-
-        # --------------------------------------------------------
-        # Save thread ID
-        # --------------------------------------------------------
-
-        if response.get("thread_id"):
-
-            current_thread_id = response["thread_id"]
-
-        # ========================================================
-        # MERGE REQUEST SELECTION
-        # ========================================================
-
-        if response.get("type") == "mr_selection":
-
-            message_text = response.get(
-                "message",
-                "Please select a Merge Request."
-            )
-
-            add_message(
-                f"AI DevOps Agent:\n\n"
-                f"{message_text}"
-            )
-
-            merge_requests = response.get(
-                "merge_requests",
-                []
-            )
-
-            if not merge_requests:
-
-                add_message(
-                    "No Merge Requests were found."
-                )
-
-                page.update()
-                return
-
-            add_message(
-                "Available Merge Requests:"
-            )
-
-            # ----------------------------------------------------
-            # Create MR selection buttons
-            # ----------------------------------------------------
-
-            for mr in merge_requests:
-
-                mr_id = mr.get("mr_iid")
-
-                title = mr.get(
-                    "title",
-                    "Untitled Merge Request"
-                )
-
-                branch = mr.get(
-                    "source_branch",
-                    ""
-                )
-
-                if branch:
-
-                    button_text = (
-                        f"MR !{mr_id} — {title}\n"
-                        f"Branch: {branch}"
-                    )
-
-                else:
-
-                    button_text = (
-                        f"MR !{mr_id} — {title}"
-                    )
-
-                # ------------------------------------------------
-                # Capture MR ID safely
-                # ------------------------------------------------
-
-                def select_mr(
-                    e,
-                    selected_mr_id=mr_id
-                ):
-
-                    nonlocal current_thread_id
-                    nonlocal current_intent
-
-                    if current_intent == "review":
-
-                        selected_message = (
-                            f"review MR "
-                            f"{selected_mr_id}"
-                        )
-
-                    elif current_intent == "suggestion":
-
-                        selected_message = (
-                            f"suggest MR "
-                            f"{selected_mr_id}"
-                        )
-
-                    else:
-
-                        selected_message = (
-                            f"suggest MR "
-                            f"{selected_mr_id}"
-                        )
-
-                    add_message(
-                        f"You: {selected_message}",
-                        is_user=True
-                    )
-
-                    page.update()
-
-                    selected_response = start_chat(
-                        selected_message,
-                        current_thread_id,
-                        token=token,
-                        project_id=page.gitlab_project_id,
-                        default_branch=page.gitlab_default_branch
-                    )
-
-                    if selected_response.get(
-                        "thread_id"
-                    ):
-
-                        current_thread_id = (
-                            selected_response[
-                                "thread_id"
-                            ]
-                        )
-
-                    if selected_response.get(
-                        "intent"
-                    ):
-
-                        current_intent = (
-                            selected_response[
-                                "intent"
-                            ]
-                        )
-
-                    handle_response(
-                        selected_response
-                    )
-
-                messages.controls.append(
-                    ft.Container(
-                        content=ft.ElevatedButton(
-                            button_text,
-                            on_click=select_mr
-                        ),
-                        padding=5
-                    )
-                )
-
-            page.update()
-            return
-
-        # ========================================================
-        # HANDLE RESPONSE
-        # ========================================================
-
-        handle_response(response)
-
-    # ============================================================
-    # HANDLE BACKEND RESPONSE
-    # ============================================================
-
-    def handle_response(response):
-
-        nonlocal current_thread_id
-        nonlocal current_intent
-
-        # --------------------------------------------------------
-        # Thread ID
-        # --------------------------------------------------------
-
-        if response.get("thread_id"):
-
-            current_thread_id = (
-                response["thread_id"]
-            )
-
-        # --------------------------------------------------------
-        # Intent
-        # --------------------------------------------------------
-
-        if response.get("intent"):
-
-            current_intent = (
-                response["intent"]
-            )
-
-        # ========================================================
-        # AI CODE REVIEW
-        # ========================================================
-
-        if response.get("type") == "review":
-
-            mr_id = response.get(
-                "mr_iid"
-            )
-
-            review = response.get(
-                "review",
-                "Unable to generate review."
-            )
-
-            add_message(
-                f"AI Code Review:\n\n"
-                f"{review}"
-            )
-
-            def post_review(e):
-
-                result = post_ai_review(
-                    mr_id
-                )
-
-                if result.get(
-                    "status"
-                ) == "posted":
-
-                    add_message(
-                        "✅ AI review successfully "
-                        "posted to GitLab."
-                    )
-
-                else:
-
-                    add_message(
-                        "❌ Failed to post AI review "
-                        "to GitLab.\n\n"
-                        f"{result.get('message', result)}"
-                    )
-
-                page.update()
-
-            messages.controls.append(
-                ft.ElevatedButton(
-                    "Post Review to GitLab",
-                    on_click=post_review
-                )
-            )
-
-            page.update()
-            return
-
-        # ========================================================
-        # AI CODE SUGGESTION
-        # ========================================================
-
-        if response.get("type") == "suggestion":
-
-            mr_id = response.get(
-                "mr_iid"
-            )
-
-            suggestions = response.get(
-                "suggestions",
-                []
-            )
-
-            if not suggestions:
-
-                add_message(
-                    "AI Code Suggestions:\n\n"
-                    "No code improvements suggested."
-                )
-
-            else:
-
-                for i, suggestion in enumerate(
-                    suggestions,
-                    start=1
-                ):
-
-                    file_path = suggestion.get(
-                        "file",
-                        "Unknown"
-                    )
-
-                    function_name = suggestion.get(
-                        "function_name",
-                        "Unknown"
-                    )
-
-                    current_code = suggestion.get(
-                        "current_code",
-                        ""
-                    )
-
-                    suggested_code = suggestion.get(
-                        "suggested_code",
-                        ""
-                    )
-
-                    reason = suggestion.get(
-                        "reason",
-                        ""
-                    )
-
-                    suggestion_text = (
-                        f"AI Code Suggestion {i}\n\n"
-                        f"File: {file_path}\n\n"
-                        f"Function: {function_name}\n\n"
-                        f"Current Code:\n"
-                        f"{current_code}\n\n"
-                        f"Suggested Code:\n"
-                        f"{suggested_code}\n\n"
-                        f"Reason:\n"
-                        f"{reason}"
-                    )
-
-                    add_message(
-                        suggestion_text
-                    )
-
-                    # ------------------------------------------------
-                    # Accept suggestion
-                    # ------------------------------------------------
-
-                    def accept_suggestion(
-                        e,
-                        mr_id=mr_id,
-                        file_path=file_path,
-                        current_code=current_code,
-                        suggested_code=suggested_code
-                    ):
-
-                        result = accept_ai_suggestion(
-                            mr_id,
-                            file_path,
-                            current_code,
-                            suggested_code
-                        )
-
-                        if result.get(
-                            "status"
-                        ) == "accepted":
-
-                            add_message(
-                                "✅ Suggestion accepted.\n\n"
-                                "The suggested code was "
-                                "applied and committed to "
-                                "the Merge Request source "
-                                "branch.\n\n"
-                                f"Commit: "
-                                f"{result.get('commit_url', '')}"
-                            )
-
-                        else:
-
-                            add_message(
-                                "❌ Failed to apply "
-                                "suggestion.\n\n"
-                                f"{result.get('message', result)}"
-                            )
-
-                        page.update()
-
-                    # ------------------------------------------------
-                    # Reject suggestion
-                    # ------------------------------------------------
-
-                    def reject_suggestion(e):
-
-                        add_message(
-                            "❌ Suggestion rejected.\n\n"
-                            "No changes were made to GitLab."
-                        )
-
-                        page.update()
-
-                    messages.controls.append(
-                        ft.Row(
-                            [
-                                ft.ElevatedButton(
-                                    "Accept Suggestion",
-                                    on_click=accept_suggestion
-                                ),
-
-                                ft.OutlinedButton(
-                                    "Reject Suggestion",
-                                    on_click=reject_suggestion
-                                )
-                            ]
-                        )
-                    )
-
-            page.update()
-            return
-
-        # ========================================================
-        # LANGGRAPH HUMAN APPROVAL
-        # ========================================================
-
-        # ========================================================
-        # LANGGRAPH HUMAN APPROVAL
-        # ========================================================
-
-        if response.get(
-                "status"
-        ) == "waiting_for_approval":
-
-            nonlocal selected_branch_field
-            nonlocal existing_branch_dropdown
-
-            current_thread_id = (
-                response["thread_id"]
-            )
-
-            suggested_branch = response.get(
-                "branch_name",
-                ""
-            )
-
-            proposal = (
-                "AI DevOps Agent:\n\n"
-                f"Analysis:\n"
-                f"{response['analysis']}\n\n"
-                f"Suggested Branch:\n"
-                f"{suggested_branch}\n\n"
-                f"Commit:\n"
-                f"{response['commit_message']}\n\n"
-                f"MR Title:\n"
-                f"{response['mr_title']}\n\n"
-                f"Generated Code:\n"
-                f"{response.get(
-                    'generated_code',
-                    'No generated code available.'
-                )}"
-            )
-
-            add_message(
-                proposal
-            )
-
-            # ====================================================
-            # CUSTOM / NEW BRANCH NAME
-            # ====================================================
-
-            selected_branch_field = ft.TextField(
-                label="New / Custom Branch Name",
-                value=suggested_branch,
-                width=420
-            )
-
-            # ====================================================
-            # FETCH EXISTING BRANCHES
-            # ====================================================
-
-            branches_response = get_branches()
-
-            branch_options = []
-
-            if isinstance(
-                    branches_response,
-                    list
-            ):
-
-                for branch in branches_response:
-
-                    branch_name = branch.get(
-                        "name"
-                    )
-
-                    if branch_name:
-                        branch_options.append(
-                            ft.dropdown.Option(
-                                branch_name
-                            )
-                        )
-
-            # ====================================================
-            # EXISTING BRANCH DROPDOWN
-            # ====================================================
-
-            existing_branch_dropdown = ft.Dropdown(
-                label="Use Existing Branch Instead",
-                hint_text="Select an existing branch",
-                width=420,
-                options=branch_options
-            )
-
-            branch_selection_ui = ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Text(
-                            "Branch Selection",
-                            size=18,
-                            weight=ft.FontWeight.BOLD
-                        ),
-
-                        ft.Text(
-                            "You can either create a new branch "
-                            "using the field below, or select an "
-                            "existing branch. Selecting an existing "
-                            "branch takes priority."
-                        ),
-
-                        selected_branch_field,
-
-                        existing_branch_dropdown,
-                    ],
-                    spacing=12
-                ),
-                padding=15,
-                border_radius=10,
-                bgcolor=ft.Colors.GREY_100
-            )
-
-            messages.controls.append(
-                branch_selection_ui
-            )
-
-            approval_buttons = ft.Row(
-                [
-                    ft.ElevatedButton(
-                        "Approve",
-                        on_click=approve
-                    ),
-
-                    ft.OutlinedButton(
-                        "Reject",
-                        on_click=reject
-                    )
-                ]
-            )
-
-            messages.controls.append(
-                approval_buttons
-            )
-
-            page.update()
-            return
-
-            current_thread_id = (
-                response["thread_id"]
-            )
-
-            proposal = (
-                "AI DevOps Agent:\n\n"
-                f"Analysis:\n"
-                f"{response['analysis']}\n\n"
-                f"Branch: "
-                f"{response['branch_name']}\n\n"
-                f"Commit: "
-                f"{response['commit_message']}\n\n"
-                f"MR Title: "
-                f"{response['mr_title']}\n\n"
-                f"Generated Code:\n"
-                f"{response.get(
-                    'generated_code',
-                    'No generated code available.'
-                )}"
-            )
-
-            add_message(
-                proposal
-            )
-
-            approval_buttons = ft.Row(
-                [
-                    ft.ElevatedButton(
-                        "Approve",
-                        on_click=approve
-                    ),
-
-                    ft.OutlinedButton(
-                        "Reject",
-                        on_click=reject
-                    )
-                ]
-            )
-
-            messages.controls.append(
-                approval_buttons
-            )
-
-            page.update()
-            return
-
-        # ========================================================
-        # LANGGRAPH COMPLETED / NORMAL RESPONSE
-        # ========================================================
-
-        result = response.get(
-            "result",
-            {}
-        )
-
-        if not isinstance(result, dict):
-
-            add_message(
-                "AI DevOps Agent:\n\n"
-                "The backend returned an unexpected response."
-            )
-
-            page.update()
-            return
-
-        # ========================================================
-        # VALIDATION FAILED
-        # ========================================================
-
-        if result.get(
-            "request_valid"
-        ) is False:
-
-            validation_message = result.get(
-                "validation_message",
-                "Please provide a valid development task."
-            )
-
-            add_message(
-                "AI DevOps Agent:\n\n"
-                f"❌ {validation_message}"
-            )
-
-            page.update()
-            return
-
-        # ========================================================
-        # SECURITY FAILURE
-        # ========================================================
-
-        security_passed = result.get(
-            "security_passed"
-        )
-
-        if security_passed is False:
-
-            security_report = result.get(
-                "security_report",
-                ""
-            )
-
-            security_summary = ""
-
-            if isinstance(
-                security_report,
-                dict
-            ):
-
-                security_summary = (
-                    security_report.get(
-                        "summary",
-                        ""
-                    )
-                )
-
-                findings = security_report.get(
-                    "findings",
-                    []
-                )
-
-                if findings:
-
-                    findings_text = "\n".join(
-                        f"• {finding}"
-                        for finding in findings
-                    )
-
-                else:
-
-                    findings_text = (
-                        "No detailed findings provided."
-                    )
-
-            else:
-
-                findings_text = str(
-                    security_report
-                )
-
-            security_message = (
-                "AI DevOps Agent:\n\n"
-                "🔐 Security Review\n\n"
-                "❌ Security check failed.\n\n"
-            )
-
-            if security_summary:
-
-                security_message += (
-                    f"Summary:\n"
-                    f"{security_summary}\n\n"
-                )
-
-            security_message += (
-                f"Security Findings:\n"
-                f"{findings_text}\n\n"
-                "🚫 Workflow stopped.\n"
-                "No branch, commit, or Merge Request "
-                "was created."
-            )
-
-            add_message(
-                security_message
-            )
-
-            page.update()
-            return
-
-        # ========================================================
-        # UNIT TEST FAILURE
-        # ========================================================
-
-        test_passed = result.get(
-            "test_passed"
-        )
-
-        if test_passed is False:
-
-            test_result = result.get(
-                "test_result",
-                "No test result available."
-            )
-
-            add_message(
-                "AI DevOps Agent:\n\n"
-                "🧪 Unit Tests\n\n"
-                "❌ Generated tests failed.\n\n"
-                f"{test_result}\n\n"
-                "🚫 Workflow stopped.\n"
-                "The code was not committed."
-            )
-
-            page.update()
-            return
-
-        # ========================================================
-        # COMPLETED WORKFLOW
-        # ========================================================
-
-        message_text = response.get(
-            "message"
-        )
-
-        if message_text:
-
-            add_message(
-                "AI DevOps Agent:\n\n"
-                f"{message_text}"
-            )
-
-            page.update()
-            return
-
-        # --------------------------------------------------------
-        # Build a clean workflow summary
-        # --------------------------------------------------------
-
-        summary_parts = [
-            "AI DevOps Agent:"
-        ]
-
-        analysis = result.get(
-            "analysis"
-        )
-
-        if analysis:
-
-            summary_parts.extend(
-                [
-                    "",
-                    "🧠 Analysis:",
-                    str(analysis)
-                ]
-            )
-
-        generated_code = result.get(
-            "generated_code"
-        )
-
-        if generated_code:
-
-            summary_parts.extend(
-                [
-                    "",
-                    "💻 Generated Code:",
-                    generated_code
-                ]
-            )
-
-        test_passed = result.get(
-            "test_passed"
-        )
-
-        if test_passed is True:
-
-            summary_parts.extend(
-                [
-                    "",
-                    "🧪 Unit Tests:",
-                    "✅ All generated tests passed."
-                ]
-            )
-
-        security_passed = result.get(
-            "security_passed"
-        )
-
-        if security_passed is True:
-
-            summary_parts.extend(
-                [
-                    "",
-                    "🔐 Security Review:",
-                    "✅ Security checks passed."
-                ]
-            )
-
-        branch_name = result.get(
-            "branch_name"
-        )
-
-        commit_message = result.get(
-            "commit_message"
-        )
-
-        mr_title = result.get(
-            "mr_title"
-        )
-
-        if branch_name:
-
-            summary_parts.extend(
-                [
-                    "",
-                    f"Branch: {branch_name}"
-                ]
-            )
-
-        if commit_message:
-
-            summary_parts.extend(
-                [
-                    f"Commit: {commit_message}"
-                ]
-            )
-
-        if mr_title:
-
-            summary_parts.extend(
-                [
-                    f"MR Title: {mr_title}"
-                ]
-            )
-
-        mr_url = result.get(
-            "mr_url"
-        )
-
-        if mr_url:
-
-            summary_parts.extend(
-                [
-                    "",
-                    f"Merge Request: {mr_url}"
-                ]
-            )
-
-        if len(summary_parts) == 1:
-
-            summary_parts.extend(
-                [
-                    "",
-                    "No additional workflow information available."
-                ]
-            )
-
-        add_message(
-            "\n".join(summary_parts)
-        )
-
-        page.update()
-
-    # ============================================================
-    # APPROVE WORKFLOW
-    # ============================================================
-
-    # ============================================================
-    # APPROVE WORKFLOW
-    # ============================================================
-
-    async def approve(e):
-
-        nonlocal current_thread_id
-        nonlocal current_intent
-        nonlocal selected_branch_field
-        nonlocal existing_branch_dropdown
-
-        if not current_thread_id:
-            return
-
-        username = await page.shared_preferences.get(
-            "username"
-        )
-
-        token = await page.shared_preferences.get(
-            "access_token"
-        )
-
-        # ========================================================
-        # DETERMINE WHICH BRANCH THE USER CHOSE
-        # ========================================================
-
-        existing_branch = None
-
-        if existing_branch_dropdown:
-            existing_branch = (
-                existing_branch_dropdown.value
-            )
-
-        # --------------------------------------------------------
-        # Existing branch selected
-        # --------------------------------------------------------
-
-        if existing_branch:
-
-            final_branch_name = (
-                existing_branch
-            )
-
-            use_existing_branch = True
-
-        # --------------------------------------------------------
-        # Otherwise create/use custom branch name
-        # --------------------------------------------------------
-
-        else:
-
-            final_branch_name = ""
-
-            if selected_branch_field:
-                final_branch_name = (
-                        selected_branch_field.value
-                        or ""
-                ).strip()
-
-            if not final_branch_name:
-                add_message(
-                    "AI DevOps Agent:\n\n"
-                    "❌ Please enter a branch name "
-                    "or select an existing branch."
-                )
-
-                page.update()
-                return
-
-            use_existing_branch = False
-
-        print(
-            "\n========== BRANCH SELECTION =========="
-        )
-
-        print(
-            "Branch:",
-            final_branch_name
-        )
-
-        print(
-            "Existing:",
-            use_existing_branch
-        )
-
-        print(
-            "======================================\n"
-        )
-
-        # ========================================================
-        # RESUME WORKFLOW
-        # ========================================================
-
-        response = send_chat_decision(
-            thread_id=current_thread_id,
-            approved=True,
-            username=username,
-            token=token,
-            branch_name=final_branch_name,
-            use_existing_branch=use_existing_branch
-        )
-
-        mr_url = response.get(
-            "mr_url"
-        )
-
-        if mr_url:
-
-            message = (
-                "AI DevOps Agent:\n\n"
-                "✅ Workflow approved.\n\n"
-                f"Branch: {final_branch_name}\n\n"
-                f"Merge Request created:\n"
-                f"{mr_url}"
-            )
-
-        else:
-
-            message = (
-                "AI DevOps Agent:\n\n"
-                "⚠️ Workflow was approved, "
-                "but the Merge Request "
-                "could not be created."
-            )
-
-        add_message(
-            message
-        )
-
-        current_thread_id = None
-        current_intent = None
-
-        selected_branch_field = None
-        existing_branch_dropdown = None
-
-        page.update()
-
-    # ============================================================
-    # REJECT WORKFLOW
-    # ============================================================
-
-    async def reject(e):
-
-        nonlocal current_thread_id
-        nonlocal current_intent
-
-        if not current_thread_id:
-            return
-
-        username = await page.shared_preferences.get(
-            "username"
-        )
-
-        token = await page.shared_preferences.get(
-            "access_token"
-        )
-
-        send_chat_decision(
-            current_thread_id,
-            False,
-            username,
-            token=token
-        )
-
-        add_message(
-            "AI DevOps Agent:\n\n"
-            "❌ Workflow rejected.\n"
-            "No branch or Merge Request was created."
-        )
-
-        current_thread_id = None
-        current_intent = None
-
-        page.update()
-
-    # ============================================================
-    # ENTER KEY
-    # ============================================================
-
-    input_box.on_submit = send_message
-
-    # ============================================================
-    # UI
-    # ============================================================
-
-    return ft.Column(
-        [
-            ft.Text(
-                "AI DevOps Agent",
-                size=28,
-                weight=ft.FontWeight.BOLD
-            ),
-
-            ft.Divider(),
-
-            messages,
-
-            ft.Row(
-                [
-                    input_box,
-
-                    ft.ElevatedButton(
-                        "Send",
-                        on_click=send_message
-                    ),
-
-                    ft.OutlinedButton(
-                        "New Chat",
-                        on_click=lambda e:
-                        reset_agent_state()
-                    )
-                ]
-            )
-        ],
-        expand=True
-    )
+    send_button = ft.ElevatedButton("Send", on_click=send)
+    new_button = ft.OutlinedButton("New Chat", on_click=reset)
+    change_button = ft.TextButton("Change repository", on_click=lambda e: reset(e, True))
+    input_box.on_submit = send
+    update_active()
+    return ft.Column([ft.Text("AI DevOps Agent", size=28), ft.Row([active, change_button]), messages,
+                      ft.Row([input_box, send_button, new_button])], expand=True)

@@ -1,9 +1,11 @@
 import flet as ft
-from api import suggest_merge_request
+from api import RepositoryAPI
 
 
 def suggestions_view(page: ft.Page):
 
+    api = RepositoryAPI(page)
+    suggest_merge_request = api.suggest_merge_request
     mr_id = ft.TextField(
         label="Merge Request ID",
         width=250
@@ -17,8 +19,6 @@ def suggestions_view(page: ft.Page):
     )
 
     def generate_suggestions(e):
-        result = suggest_merge_request(mr_id.value)
-        print(result)
         if not mr_id.value:
             page.snack_bar = ft.SnackBar(
                 ft.Text("Please enter a Merge Request ID.")
@@ -29,8 +29,8 @@ def suggestions_view(page: ft.Page):
 
         result = suggest_merge_request(mr_id.value)
 
-        if "suggestion" in result:
-            suggestion_output.value = result["suggestion"]
+        if "suggestions" in result:
+            suggestion_output.value = "\n\n".join(f"File: {item.get('file')}\n{item.get('suggested_code')}\n{item.get('reason')}" for item in result["suggestions"]) or "No suggestions generated."
         else:
             suggestion_output.value = result.get(
                 "message",

@@ -1,10 +1,12 @@
 import flet as ft
 
-from api import search_merge_requests
+from api import RepositoryAPI
 
 
 def search_view(page: ft.Page):
 
+    api = RepositoryAPI(page)
+    search_merge_requests = api.search_merge_requests
     search_box = ft.TextField(
         label="Search Merge Requests",
         hint_text="Enter a keyword...",
@@ -30,6 +32,11 @@ def search_view(page: ft.Page):
         response = search_merge_requests(
             search_box.value.strip()
         )
+
+        if isinstance(response, dict) and response.get("error"):
+            results.controls.append(ft.Text(response.get("message", "Search failed.")))
+            page.update()
+            return
 
         if not response:
             results.controls.append(

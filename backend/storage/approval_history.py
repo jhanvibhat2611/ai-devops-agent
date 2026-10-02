@@ -1,134 +1,28 @@
-import sqlite3
-import os
+"""Non-destructive project identity migration for existing approval history."""
+from .database import get_connection
 
 
-# ============================================================
-# PROJECT PATHS
-# ============================================================
-
-BACKEND_DIR = os.path.dirname(
-    os.path.dirname(
-        os.path.abspath(__file__)
-    )
-)
-
-PROJECT_DIR = os.path.dirname(
-    BACKEND_DIR
-)
-
-DB_NAME = os.path.join(
-    PROJECT_DIR,
-    "frontend",
-    "users.db"
-)
+def migrate(connection):
+    connection.execute("""CREATE TABLE IF NOT EXISTS merge_request_approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, mr_iid INTEGER NOT NULL,
+        username TEXT NOT NULL, status TEXT NOT NULL,
+        approved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, project_id INTEGER, thread_id TEXT)""")
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(merge_request_approvals)")}
+    for name, kind in (("project_id", "INTEGER"), ("thread_id", "TEXT")):
+        if name not in columns:
+            connection.execute(f"ALTER TABLE merge_request_approvals ADD COLUMN {name} {kind}")
+    connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS approval_workflow ON merge_request_approvals(thread_id) WHERE thread_id IS NOT NULL")
 
 
-# ============================================================
-# DATABASE CONNECTION
-# ============================================================
-
-def get_connection():
-
-    return sqlite3.connect(
-        DB_NAME
-    )
+def save_merge_request_approval(mr_iid, username, status, project_id, thread_id=None):
+    with get_connection() as connection:
+        migrate(connection)
+        connection.execute("INSERT OR IGNORE INTO merge_request_approvals (project_id,mr_iid,username,status,thread_id) VALUES (?,?,?,?,?)",
+                           (project_id, mr_iid, username, status, thread_id))
 
 
-# ============================================================
-# SAVE APPROVAL
-# ============================================================
-
-def save_merge_request_approval(
-    mr_iid,
-    username,
-    status
-):
-
-    connection = get_connection()
-
-    try:
-
-        cursor = connection.cursor()
-
-        cursor.execute(
-            """
-            INSERT INTO merge_request_approvals (
-                mr_iid,
-                username,
-                status
-            )
-            VALUES (?, ?, ?)
-            """,
-            (
-                mr_iid,
-                username,
-                status
-            )
-        )
-
-        connection.commit()
-
-        print(
-            f"✅ Approval history saved for MR !{mr_iid}"
-        )
-
-    except Exception as error:
-
-        connection.rollback()
-
-        print(
-            f"❌ Failed to save approval history: {error}"
-        )
-
-        raise
-
-    finally:
-
-        connection.close()
-
-
-# ============================================================
-# GET APPROVAL HISTORY
-# ============================================================
-
-def get_merge_request_approvals(
-    mr_iid
-):
-
-    connection = get_connection()
-
-    try:
-
-        cursor = connection.cursor()
-
-        cursor.execute(
-            """
-            SELECT
-                mr_iid,
-                username,
-                status,
-                approved_at
-            FROM merge_request_approvals
-            WHERE mr_iid = ?
-            ORDER BY approved_at DESC
-            """,
-            (
-                mr_iid,
-            )
-        )
-
-        approvals = cursor.fetchall()
-
-        return [
-            {
-                "mr_iid": approval[0],
-                "username": approval[1],
-                "status": approval[2],
-                "approved_at": approval[3]
-            }
-            for approval in approvals
-        ]
-
-    finally:
-
-        connection.close()
+def get_merge_request_approvals(mr_iid, project_id):
+    with get_connection() as connection:
+        migrate(connection)
+        rows = connection.execute("SELECT project_id,mr_iid,username,status,approved_at,thread_id FROM merge_request_approvals WHERE project_id=? AND mr_iid=? ORDER BY approved_at DESC", (project_id, mr_iid))
+        return [dict(zip(("project_id", "mr_iid", "username", "status", "approved_at", "thread_id"), row)) for row in rows]

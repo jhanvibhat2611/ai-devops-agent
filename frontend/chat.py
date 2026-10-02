@@ -9,9 +9,10 @@ from views.agent import agent_view
 
 def show_chat(page: ft.Page):
 
+    agent = agent_view(page)
     content = ft.Container(
         expand=True,
-        content=agent_view(page)
+        content=agent
     )
 
     def change_view(e):
@@ -20,7 +21,7 @@ def show_chat(page: ft.Page):
 
 
         if index == 0:
-            content.content = agent_view(page)
+            content.content = agent
 
         elif index == 1:
             content.content = home_view(page)

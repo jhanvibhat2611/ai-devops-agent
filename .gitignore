@@ -16,3 +16,18 @@ __pycache__/
 Thumbs.db
 
 users.json
+
+# Local GitLab repository workspaces
+backend/workspaces/
+# Local credentials and runtime state
+secret.key
+**/secret.key
+users.db
+**/users.db
+**/users.json
+*.db-wal
+*.db-shm
+.pytest_cache/
+.coverage
+
+.venv/

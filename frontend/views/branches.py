@@ -1,10 +1,13 @@
 import flet as ft
 
-from api import get_branches, create_branch
+from api import RepositoryAPI
 
 
 def branches_view(page):
 
+    api = RepositoryAPI(page)
+    get_branches = api.get_branches
+    create_branch = api.create_branch
     branch_name = ft.TextField(
         label="Branch Name"
     )

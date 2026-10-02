@@ -7,11 +7,15 @@ class WorkflowState(TypedDict):
     # USER / REPOSITORY CONTEXT
     # ============================================================
 
+    thread_id: str
+    target_file: str
     username: str
 
     gitlab_project_id: int
 
     gitlab_default_branch: str
+
+    gitlab_clone_url: str
 
     # ============================================================
     # REQUEST

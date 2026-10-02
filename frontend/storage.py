@@ -1,5 +1,9 @@
 import sqlite3
 import os
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+from backend.storage.approval_history import migrate
 
 from cryptography.fernet import Fernet
 
@@ -34,6 +38,12 @@ def get_connection():
 def get_encryption_key():
 
     if not os.path.exists(KEY_FILE):
+
+        if os.path.exists(DB_NAME):
+            with sqlite3.connect(DB_NAME) as connection:
+                table = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
+                if table and connection.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+                    raise RuntimeError("Existing accounts require their original secret.key. Restore that key; do not replace it.")
 
         key = Fernet.generate_key()
 
@@ -90,206 +100,6 @@ def initialize_database():
         )
     """)
 
+    migrate(connection)
     connection.commit()
     connection.close()
-
-
-# ============================================================
-# USER FUNCTIONS
-# ============================================================
-
-def user_exists(username):
-
-    connection = get_connection()
-    cursor = connection.cursor()
-
-    cursor.execute(
-        "SELECT username FROM users WHERE username = ?",
-        (username,)
-    )
-
-    user = cursor.fetchone()
-
-    connection.close()
-
-    return user is not None
-
-
-def verify_user(username, password):
-
-    connection = get_connection()
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        SELECT password
-        FROM users
-        WHERE username = ?
-        """,
-        (username,)
-    )
-
-    user = cursor.fetchone()
-
-    connection.close()
-
-    if user is None:
-        return False
-
-    return user[0] == password
-
-
-def create_user(
-    username,
-    password,
-    gitlab_username,
-    gitlab_token
-):
-
-    # Encrypt the GitLab token before storing it
-    encrypted_token = cipher.encrypt(
-        gitlab_token.encode()
-    ).decode()
-
-    connection = get_connection()
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        INSERT INTO users (
-            username,
-            password,
-            gitlab_username,
-            gitlab_token
-        )
-        VALUES (?, ?, ?, ?)
-        """,
-        (
-            username,
-            password,
-            gitlab_username,
-            encrypted_token
-        )
-    )
-
-    connection.commit()
-    connection.close()
-
-
-# ============================================================
-# GET DECRYPTED GITLAB TOKEN
-# ============================================================
-
-def get_gitlab_token(username):
-
-    connection = get_connection()
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        SELECT gitlab_token
-        FROM users
-        WHERE username = ?
-        """,
-        (username,)
-    )
-
-    user = cursor.fetchone()
-
-    connection.close()
-
-    if user is None:
-        return None
-
-    encrypted_token = user[0]
-
-    decrypted_token = cipher.decrypt(
-        encrypted_token.encode()
-    ).decode()
-
-    return decrypted_token
-
-
-# ============================================================
-# MERGE REQUEST APPROVAL FUNCTIONS
-# ============================================================
-
-def save_merge_request_approval(
-    mr_iid,
-    username,
-    status
-):
-
-    connection = get_connection()
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        INSERT INTO merge_request_approvals (
-            mr_iid,
-            username,
-            status
-        )
-        VALUES (?, ?, ?)
-        """,
-        (
-            mr_iid,
-            username,
-            status
-        )
-    )
-
-    connection.commit()
-    connection.close()
-
-
-def get_merge_request_approvals(mr_iid):
-
-    connection = get_connection()
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        SELECT
-            mr_iid,
-            username,
-            status,
-            approved_at
-        FROM merge_request_approvals
-        WHERE mr_iid = ?
-        ORDER BY approved_at DESC
-        """,
-        (mr_iid,)
-    )
-
-    approvals = cursor.fetchall()
-
-    connection.close()
-
-    return [
-        {
-            "mr_iid": approval[0],
-            "username": approval[1],
-            "status": approval[2],
-            "approved_at": approval[3]
-        }
-        for approval in approvals
-    ]
-
-if __name__ == "__main__":
-    connection = get_connection()
-    cursor = connection.cursor()
-
-    cursor.execute(
-        "SELECT username, gitlab_token FROM users"
-    )
-
-    users = cursor.fetchall()
-
-    for user in users:
-        print(user)
-
-    connection.close()
-
-if __name__ == "__main__":
-    print(get_gitlab_token("jj"))
