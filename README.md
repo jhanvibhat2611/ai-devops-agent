@@ -348,6 +348,38 @@ separate temperature-zero model, 1–5 fixed-input tests, import/AST checks, and
 most two structural repairs. A structurally valid assertion failure is preserved;
 it is never repaired merely to make the implementation pass.
 
+The runner supports pure Python functions plus local PyJWT signing/verification,
+datetime and standard-library hashing. JWT network key discovery (`PyJWKClient`),
+HTTP frameworks and filesystem/process dependencies are not enabled by this profile.
+Direct `os.getenv(...)` and `os.environ.get(...)` configuration reads (including
+import aliases) are allowed against the sanitized child environment. Other `os`
+capabilities and escaping its module/environment objects remain blocked.
+Generation instructions exclude import-time demos, example tokens and server
+startup, and require environment configuration instead of real hardcoded secrets.
+Safety failures appear in chat as a safety pre-check failure, with technical
+metadata in expandable Workflow details.
+A broad request such as “Create a login system using JWT.” needs analysis that
+clarifies its interface, credential rules, claims and token lifetime before tests
+can derive independent expectations. If those remain unclear, the model must
+return a clarification response rather than infer requirements from the code.
+
+Failures carry `test_failure.stage`, `error_category`, `error_code` and
+`safe_message`, alongside `test_passed=False` and a friendly `test_result`.
+Categories distinguish model invocation, malformed output, invalid test structure,
+unsupported/unsafe implementation, ambiguous specification, pytest execution and
+behavioral implementation failure. The backend logger `workflow.test_agent`
+emits the exception types and internal traceback frame locations. Rejected tests
+also log the attempt, specific validation rule, AST type, line and known forbidden
+name. A redacted structural rendering of the tests removes all literal values,
+comments and arbitrary identifiers. Raw test code, prompts, locals and pytest
+output are never logged. Rule-specific safe codes distinguish missing imports,
+unsafe imports/names, unsupported dependencies, test counts, missing assertions,
+copied implementations and self-oracles, and guide the existing two repair attempts.
+Normal pytest imports and an inactive module-level `__name__ == "__main__"`
+guard are accepted; arbitrary dunder access remains blocked. Valid
+failing assertions are preserved, and missing fixtures/runner errors are not
+reported as implementation failures.
+
 Before pytest, a conservative static allowlist rejects file/network/process
 imports and unsafe builtins. Execution has a 10-second hard timeout, streamed
 output capped at 16 KB, plugin autoload disabled, a minimal child environment, and

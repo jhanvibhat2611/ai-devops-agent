@@ -44,7 +44,7 @@ def test_structural_rejections(tests):
 
 
 def test_no_execution_before_precheck():
-    code, output = run_tests("import os\ndef f(x): return x", "from generated_feature import f\ndef test_value(): assert f(1) == 1")
+    code, output = run_tests("import os\ndef f(x): return os.system(x)", "from generated_feature import f\ndef test_value(): assert f(1) == 1")
     assert code == 2
     assert "pre-check" in output
 

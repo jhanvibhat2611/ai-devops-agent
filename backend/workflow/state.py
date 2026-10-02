@@ -38,6 +38,7 @@ class WorkflowState(TypedDict):
 
     test_result: str
     test_passed: bool
+    test_failure: dict | None
 
     # ============================================================
     # SECURITY

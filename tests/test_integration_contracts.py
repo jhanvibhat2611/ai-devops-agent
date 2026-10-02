@@ -76,6 +76,53 @@ def load_frontend(monkeypatch):
     return module
 
 
+def test_generation_prompt_requires_import_safe_implementation(monkeypatch):
+    source = 'def issue(): return "example".decode("utf-8")'
+    llm = Mock(invoke=Mock(return_value=SimpleNamespace(content=source)))
+    monkeypatch.setattr(nodes, "llm1", llm)
+    result = nodes.generate_code({"user_request": "Create a login system using JWT.", "analysis": "JWT login"})
+    assert result["generated_code"] == source  # No rewriting implementation defects.
+    prompt = llm.invoke.call_args.args[0]
+    assert "free of demo/example execution" in prompt
+    assert "at module scope" in prompt and "app.run()" in prompt
+    assert "Never hardcode real secrets" in prompt
+    assert "environment configuration" in prompt
+
+
+def test_safety_failure_is_workflow_message_with_expandable_details(monkeypatch):
+    import flet as ft
+    module = load_frontend(monkeypatch)
+    failure = {"stage": "source_precheck", "error_category": "unsafe_generated_code",
+               "error_code": "UnsafeCodeError", "safe_message": "Blocked unsafe capabilities."}
+    api = Mock()
+    api.start_chat.return_value = {"status": "completed", "result": {
+        "test_passed": False, "test_result": failure["safe_message"], "test_failure": failure}}
+    monkeypatch.setattr(module, "RepositoryAPI", lambda page: api)
+    view = module.agent_view(SimpleNamespace(auth_token="fixture", update=lambda: None))
+    field = next(c for c in walk(view) if isinstance(c, ft.TextField))
+    field.value = "Create a login system using JWT."
+    field.on_submit(None)
+    messages = view.controls[2].controls
+    def visible_text(control):
+        if isinstance(control, ft.ExpansionTile):
+            return []
+        if isinstance(control, ft.Text):
+            return [control.value]
+        children = list(getattr(control, "controls", []) or [])
+        content = getattr(control, "content", None)
+        if content is not None and not isinstance(content, str):
+            children.append(content)
+        return [text for child in children for text in visible_text(child)]
+    main_text = "\n".join(visible_text(view.controls[2]))
+    assert "The generated implementation could not be tested safely." in main_text
+    assert "Test Result" not in main_text and "source_precheck" not in main_text
+    details = next(c for c in walk(view) if isinstance(c, ft.ExpansionTile))
+    assert details.title.value == "Workflow details"
+    assert not details.expanded
+    detail_text = "\n".join(c.value for c in walk(details) if isinstance(c, ft.Text))
+    assert "source_precheck" in detail_text and "unsafe_generated_code" in detail_text
+
+
 def walk(control):
     yield control
     for child in getattr(control,"controls",[]) or []:

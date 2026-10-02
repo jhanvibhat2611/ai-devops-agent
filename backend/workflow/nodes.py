@@ -292,6 +292,12 @@ IMPORTANT REQUIREMENTS
 - Keep the implementation simple and maintainable.
 - Use appropriate Python best practices.
 - Include all required imports.
+- Keep module imports free of demo/example execution unless the user explicitly requests it.
+- Normally emit only functions, classes, routes and configuration definitions.
+- Do not issue example tokens, print examples, call feature functions or start servers
+  (such as app.run()) at module scope. Put explicitly requested demos behind a main guard.
+- Never hardcode real secrets. Use environment configuration where appropriate;
+  require a configured production signing key rather than an insecure default secret.
 - Do not invent unrelated functionality.
 - Do not include explanations.
 - Do not include Markdown.
